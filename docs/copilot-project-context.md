@@ -197,7 +197,7 @@ Make the loss configurable from experiment config.
 - write preprocessing steps as deterministic functions
 - avoid chained assignment
 - validate sorted timestamps and stock IDs
-- ensure panel data indexing is explicit (`date`, `symbol`)
+- ensure panel data indexing is explicit (`date`, `ts_code`)
 - prefer parquet / feather / pickle only when justified; csv is acceptable for portability
 
 ---

@@ -19,7 +19,7 @@
 落到工程上，项目不是单纯追求“把 LSTM 跑起来”，而是强调下面几件事：
 
 - **时间序列安全**：只允许按时间先后构造样本、标签和切分数据。
-- **面板数据一致性**：样本按 `date × symbol` 组织，避免跨股票、跨时间错误对齐。
+- **面板数据一致性**：样本按 `date × ts_code` 组织，避免跨股票、跨时间错误对齐。
 - **研究可复现**：特征构造、标签生成、模型结构都拆成模块，方便做 ablation 与迭代。
 - **工程可演进**：数据层、特征层、模型层彼此解耦，后续可以继续接训练、评估、回测模块。
 
@@ -215,7 +215,7 @@ AMC-LSTM 的关键优化在于：
 
 `src/alpha_arena/features/targets.py`
 
-- 使用 `groupby("symbol").shift(-h)` 构造 `y_ret_h`
+- 使用 `groupby("ts_code").shift(-h)` 构造 `y_ret_h`
 - 标签只依赖未来价格
 - 不跨股票错位
 - 序列末尾自然产生 NaN，需要在训练切片时去掉
@@ -280,7 +280,7 @@ from alpha_arena.features.selector import select_lstm_feature_columns
 from alpha_arena.models.aedh_lstm import AttentionEnhancedDualHeadLSTM, AEDH_LSTMConfig
 
 panel_df = build_panel_features(raw_df)
-panel_df = add_targets(panel_df, horizons=(1, 5, 10))
+panel_df, target_columns = add_targets(panel_df, horizons=(1, 5, 10))
 feature_cols = select_lstm_feature_columns(panel_df)
 
 model = AttentionEnhancedDualHeadLSTM(

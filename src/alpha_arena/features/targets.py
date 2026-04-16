@@ -15,6 +15,7 @@ from __future__ import annotations
 from typing import Sequence
 
 import pandas as pd
+import numpy as np
 
 from alpha_arena.features.utils import _safe_div
 
@@ -23,48 +24,109 @@ def add_targets(
     df: pd.DataFrame,
     horizons: Sequence[int] = (1, 5, 10),
     price_col: str = "close",
-) -> pd.DataFrame:
-    """为 panel DataFrame 构造多周期未来收益率标签。
+    add_risk_target: bool = True,
+    add_risk_adjusted_return: bool = True,
+) -> tuple[pd.DataFrame, list[str]]:
+    """为 panel DataFrame 构造未来收益与未来风险标签。
 
-    对每个预测期 h，计算 h 日后的简单收益率作为回归目标，
-    同时构造一个风险调整目标（当 ``volatility_20`` 列存在时）。
+    目标定义
+    --------
+    对每个预测期 h：
 
-    **无数据泄漏保证**：使用 ``groupby("symbol").shift(-h)``，
-    仅在同一股票内部向前移位，不会跨股票错误对齐。
-    序列末尾 h 行因无未来数据而产生 NaN，训练时需截断。
+    - y_ret_{h}:
+        未来 h 日简单收益率 = P[t+h] / P[t] - 1
+
+    - y_risk_vol_{h}:
+        未来 h 日实现波动率（realized volatility），
+        基于未来逐日收益 ret_1 在区间 (t, t+h] 内的标准差计算。
+        这是真正可作为 risk head 的监督信号。
+
+    - y_ret_{h}_ra:
+        风险调整收益 = y_ret_{h} / volatility_20
+        仅当当前行存在 volatility_20 时构造。
+        这是 reward-to-risk 风格目标，不是纯 risk。
+
+    无数据泄漏说明
+    --------------
+    1. 收益标签 y_ret_{h} 通过 groupby("ts_code").shift(-h) 构造，
+       仅使用同一股票未来价格。
+    2. 风险标签 y_risk_vol_{h} 仅使用未来窗口内的逐日收益，
+       不使用未来窗口之外的信息。
+    3. 若 df 中已有 ret_1 / volatility_20，它们应当由历史数据计算得到。
 
     Parameters
     ----------
     df:
-        已完成特征工程的 panel DataFrame，须包含
-        ``symbol``、``date``、``price_col`` 三列，
-        且已按 (symbol, date) 排序。
+        panel DataFrame，至少包含 ts_code, date, price_col。
+        且建议已按 (ts_code, date) 排序。
     horizons:
-        预测期列表（单位：交易日）。
-        默认 (1, 5, 10) 对应短期、周度、半月度预测。
+        预测期（交易日）。
     price_col:
-        用于计算收益率的价格列名，默认 ``"close"``。
+        价格列，默认 close。
+    add_risk_target:
+        是否构造未来实现波动率标签。
+    add_risk_adjusted_return:
+        是否构造风险调整收益标签。
 
     Returns
     -------
-    pd.DataFrame
-        追加了以下目标列的副本：
-
-        - ``y_ret_{h}``   : h 日后简单收益率 = P_{t+h} / P_t - 1
-        - ``y_ret_5_ra``  : 5 日收益率除以 volatility_20（仅当该列存在时），
-          风险调整收益率，可作为更稳定的训练目标
+    tuple[pd.DataFrame, list[str]]
+        增广后的 DataFrame 与目标列名列表。
     """
-    out = df.sort_values(["symbol", "date"]).copy()
+    required_cols = {"ts_code", "date", price_col}
+    missing = required_cols - set(df.columns)
+    if missing:
+        raise ValueError(f"Missing required columns: {sorted(missing)}")
+
+    out = df.sort_values(["ts_code", "date"]).copy()
+    target_columns: list[str] = []
+
+    # 若没有 ret_1，则先按股票内部构造逐日收益
+    if "ret_1" not in out.columns:
+        out["ret_1"] = out.groupby("ts_code", sort=False)[price_col].pct_change()
+
+    grouped_price = out.groupby("ts_code", sort=False)[price_col]
 
     for h in horizons:
-        # shift(-h)：将未来第 h 期的价格对齐到当前行
-        # groupby 保证跨股票边界不连通
-        future_price = out.groupby("symbol")[price_col].shift(-h)
-        out[f"y_ret_{h}"] = future_price / out[price_col] - 1.0
+        # -------- 1) future return target --------
+        future_price = grouped_price.shift(-h)
+        ret_col = f"y_ret_{h}"
+        out[ret_col] = future_price / out[price_col] - 1.0
+        target_columns.append(ret_col)
 
-    # 风险调整目标：5 日收益 / 近期波动率
-    # 对高波动时期的大收益进行"惩罚"，使模型关注稳定性而非绝对幅度
-    if "volatility_20" in out.columns and "y_ret_5" in out.columns:
-        out["y_ret_5_ra"] = _safe_div(out["y_ret_5"], out["volatility_20"])
+        # -------- 2) future realized volatility target --------
+        # 定义：用未来区间 (t, t+h] 的逐日收益 ret_1 的标准差作为未来风险
+        # 对每个股票：
+        #   risk_t = std(ret_{t+1}, ..., ret_{t+h})
+        if add_risk_target:
+            risk_col = f"y_risk_vol_{h}"
 
-    return out
+            def _future_realized_vol(g: pd.DataFrame) -> pd.Series:
+                r = g["ret_1"].to_numpy(dtype=np.float64)
+                n = len(r)
+                out_arr = np.full(n, np.nan, dtype=np.float64)
+
+                for i in range(n):
+                    start = i + 1
+                    end = i + h + 1  # python slice end exclusive
+                    if end <= n:
+                        window = r[start:end]
+                        if np.isfinite(window).all():
+                            # ddof=0 更稳，避免小窗口不必要的 NaN
+                            out_arr[i] = float(np.std(window, ddof=0))
+                return pd.Series(out_arr, index=g.index)
+
+            out[risk_col] = (
+                out.groupby("ts_code", sort=False, group_keys=False)
+                .apply(_future_realized_vol)
+                .astype("float32")
+            )
+            target_columns.append(risk_col)
+
+        # -------- 3) risk-adjusted return target --------
+        if add_risk_adjusted_return and "volatility_20" in out.columns:
+            ra_col = f"y_ret_{h}_ra"
+            out[ra_col] = _safe_div(out[ret_col], out["volatility_20"]).astype("float32")
+            target_columns.append(ra_col)
+
+    return out, target_columns

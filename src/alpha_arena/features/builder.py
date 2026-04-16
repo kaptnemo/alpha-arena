@@ -18,7 +18,7 @@ from typing import List, Optional
 
 import pandas as pd
 
-from alpha_arena.features.config import FeatureConfig
+from alpha_arena.features.config import FeatureConfig, FeatureSpec
 from alpha_arena.features.utils import (
     _check_input,
     _rolling_zscore,
@@ -29,21 +29,66 @@ from alpha_arena.features.utils import (
 from alpha_arena.features.date_encoder import _add_time_features
 from alpha_arena.features.base_features import _add_base_features
 from alpha_arena.features.ta_features import _add_ta_library_features, _add_pandas_ta_features
+from alpha_arena.features.targets import add_targets
+from alpha_arena.utils import get_logger
+
+logger = get_logger(__name__)
+
+class FeatureSchemaCollector:
+    def __init__(self) -> None:
+        self._specs: dict[str, FeatureSpec] = {}
+
+    def add(self, spec: FeatureSpec) -> None:
+        old = self._specs.get(spec.name)
+        if old is not None and old != spec:
+            raise ValueError(
+                f"Conflicting FeatureSpec for column '{spec.name}': "
+                f"{old} vs {spec}"
+            )
+        self._specs[spec.name] = spec
+
+    def extend(self, specs: list[FeatureSpec]) -> None:
+        for spec in specs:
+            self.add(spec)
+
+    def drop_missing_from_df(self, df: pd.DataFrame) -> None:
+        actual_cols = set(df.columns)
+        self._specs = {k: v for k, v in self._specs.items() if k in actual_cols}
+
+    def add_from_df_defaults(self, df: pd.DataFrame) -> None:
+        # 可选：对未声明但实际存在的列补默认 schema
+        for c in df.columns:
+            if c not in self._specs:
+                self._specs[c] = FeatureSpec(
+                    name=c,
+                    kind="numeric",
+                    dtype=str(df[c].dtype),
+                )
+
+    def to_list(self) -> list[FeatureSpec]:
+        return [self._specs[k] for k in sorted(self._specs)]
+
+    def to_dict(self) -> dict[str, dict[str, str]]:
+        return {
+            name: {"kind": spec.kind, "dtype": spec.dtype}
+            for name, spec in sorted(self._specs.items())
+        }
 
 
 def _build_features_for_one_symbol_task(
     args: tuple[pd.DataFrame, FeatureConfig],
-) -> pd.DataFrame:
+) -> tuple[pd.DataFrame, list[FeatureSpec]]:
     """供多进程池调用的顶层 worker，保证可 pickling。"""
     g, cfg = args
     return build_features_for_one_symbol(g, cfg)
 
 
-def _add_cross_sectional_features(feat: pd.DataFrame, cfg: FeatureConfig) -> pd.DataFrame:
+def _add_cross_sectional_features(feat: pd.DataFrame, cfg: FeatureConfig) -> tuple[pd.DataFrame, list[FeatureSpec]]:
     """在主进程内追加横截面特征，避免跨进程共享大对象。"""
     if not cfg.cross_sectional_rank:
-        return feat
+        return feat, []
 
+    feature_specs = []
     # 候选列：常用因子，从实际列名中过滤（部分指标可能未开启）
     candidate_cols = [
         "ret_1", "ret_5", "ret_10", "ret_20",
@@ -63,15 +108,17 @@ def _add_cross_sectional_features(feat: pd.DataFrame, cfg: FeatureConfig) -> pd.
         new_columns[rank_col] = _cross_sectional_rank(feat, c)
         # 截面 Z-score：消除当日市场整体水平的影响
         new_columns[z_col] = _cross_sectional_zscore(feat, c)
+        feature_specs.append(FeatureSpec(name=rank_col, kind="cross_sectional", dtype="float32"))
+        feature_specs.append(FeatureSpec(name=z_col, kind="cross_sectional", dtype="float32"))
 
-    return pd.concat([feat, pd.DataFrame(new_columns, index=feat.index)], axis=1)
+    return pd.concat([feat, pd.DataFrame(new_columns, index=feat.index)], axis=1), feature_specs
 
 
 # ---------------------------------------------------------------------------
 # 单只股票
 # ---------------------------------------------------------------------------
 
-def build_features_for_one_symbol(g: pd.DataFrame, cfg: FeatureConfig) -> pd.DataFrame:
+def build_features_for_one_symbol(g: pd.DataFrame, cfg: FeatureConfig) -> tuple[pd.DataFrame, list[FeatureSpec]]:
     """对单只股票按顺序执行全量特征工程。
 
     调用顺序及必要性说明：
@@ -108,31 +155,46 @@ def build_features_for_one_symbol(g: pd.DataFrame, cfg: FeatureConfig) -> pd.Dat
         - 原始特征：无后缀（e.g., ``ret_1``, ``rsi_14``）
         - 时序 Z-score：原列名 + ``_z{window}``（e.g., ``ret_1_z20``）
     """
+    collector = FeatureSchemaCollector()
+    feature_specs = [
+        FeatureSpec(name="ts_code", kind="id", dtype="str"),
+        FeatureSpec(name="date", kind="id", dtype="datetime64[ns]"),
+        FeatureSpec(name="open", kind="numeric", dtype="float32"),
+        FeatureSpec(name="high", kind="numeric", dtype="float32"),
+        FeatureSpec(name="low", kind="numeric", dtype="float32"),
+        FeatureSpec(name="close", kind="numeric", dtype="float32"),
+        FeatureSpec(name="volume", kind="numeric", dtype="float32"),
+    ]
+    collector.extend(feature_specs)
     g = g.sort_values("date").copy()
 
+
     # 1. 基础价格 / 收益率 / 风险调整特征
-    g = _add_base_features(g, cfg)
+    g, base_feature_specs = _add_base_features(g, cfg)
+    collector.extend(base_feature_specs)
 
     # 2. ta 库技术指标（动量、趋势、波动率、量能）
     if cfg.add_ta_features:
-        g = _add_ta_library_features(g)
+        g, ta_feature_specs = _add_ta_library_features(g)
+        collector.extend(ta_feature_specs)
 
     # 3. pandas-ta 扩展指标（Supertrend、KDJ 等）
     if cfg.add_pandas_ta_features:
-        g = _add_pandas_ta_features(g)
+        g, pandas_ta_feature_specs = _add_pandas_ta_features(g)
+        collector.extend(pandas_ta_feature_specs)
 
     # 4. 日历周期特征（sin/cos 编码）
     time_feature_cols = []
     if cfg.add_time_features:
-        g, time_feature_cols = _add_time_features(g)
+        g, time_feature_cols, time_feature_specs = _add_time_features(g)
+        collector.extend(time_feature_specs)
 
     # 5. 对所有数值特征做滚动 Z-score 标准化
     #    目的：消除不同特征量纲差异，使 LSTM 的梯度更稳定
-    #    排除 symbol / date 等非数值列，以及 Z-score 本身（防止二次标准化）
+    #    排除 ts_code / date 等非数值列，以及 Z-score 本身（防止二次标准化）
     numeric_cols: List[str] = [
-        c for c in g.columns
-        if c not in ("symbol", "date")
-        and pd.api.types.is_numeric_dtype(g[c])
+        spec.name for spec in collector.to_list()
+        if spec.kind == "numeric" and spec.name not in time_feature_cols
     ]
 
     new_columns = {}
@@ -143,13 +205,23 @@ def build_features_for_one_symbol(g: pd.DataFrame, cfg: FeatureConfig) -> pd.Dat
         for w in cfg.zscore_windows:
             col_name = f"{c}_z{w}"
             new_columns[col_name] = _rolling_zscore(g[c], w)
+            collector.add(FeatureSpec(name=col_name, kind="numeric", dtype="float32"))
     new_df = pd.DataFrame(new_columns, index=g.index)
     g = pd.concat([g, new_df], axis=1)
     # 6. 前向填充：将滚动窗口预热期产生的前几行 NaN 传播至下一个有效值
-    if cfg.fill_method == "ffill":
-        g[numeric_cols] = g[numeric_cols].ffill()
+    # if cfg.fill_method == "ffill":
+    #     g[numeric_cols] = g[numeric_cols].ffill()
 
-    return g
+    spec_names = [s.name for s in collector.to_list()]
+    missing_in_df = [name for name in spec_names if name not in g.columns]
+    extra_in_df = [c for c in g.columns if c not in spec_names]
+
+    if missing_in_df:
+        raise ValueError(f"Schema columns missing in DataFrame: {missing_in_df}")
+    if extra_in_df:
+        logger.warning(f"DataFrame contains columns not in schema: {extra_in_df}")
+
+    return g, collector.to_list()
 
 
 # ---------------------------------------------------------------------------
@@ -159,15 +231,15 @@ def build_features_for_one_symbol(g: pd.DataFrame, cfg: FeatureConfig) -> pd.Dat
 def build_panel_features(
     df: pd.DataFrame,
     cfg: Optional[FeatureConfig] = None,
-) -> pd.DataFrame:
+) -> tuple[pd.DataFrame, list[FeatureSpec]]:
     """对多股票 panel DataFrame 批量执行特征工程。
 
     Pipeline 流程：
 
-    1. **输入校验** ：检查必要列，统一日期类型，按 (symbol, date) 排序。
+    1. **输入校验** ：检查必要列，统一日期类型，按 (ts_code, date) 排序。
     2. **逐股票特征构造** ：调用 ``build_features_for_one_symbol``，
        各股票独立计算，保证时序隔离（无跨股票数据泄漏）。
-    3. **拼接** ：按 (date, symbol) 排序，重置索引，便于后续切片。
+    3. **拼接** ：按 (date, ts_code) 排序，重置索引，便于后续切片。
     4. **横截面标准化（可选）** ：对指定因子列在每个交易日截面内计算
        百分比排名（``_cs_rank``）和 Z-score（``_cs_z``），
        用于构建截面因子或多任务学习的辅助目标。
@@ -176,14 +248,14 @@ def build_panel_features(
     ----------
     df:
         原始 panel DataFrame，必须包含
-        ``symbol / date / open / high / low / close / volume``。
+        ``ts_code / date / open / high / low / close / volume``。
     cfg:
         特征工程配置，默认使用 ``FeatureConfig()``（全部开启）。
 
     Returns
     -------
     pd.DataFrame
-        包含全量特征的 panel DataFrame，以 (date, symbol) 为逻辑顺序排列。
+        包含全量特征的 panel DataFrame，以 (date, ts_code) 为逻辑顺序排列。
 
         **横截面列**（``cfg.cross_sectional_rank=True`` 时追加）：
         - ``{col}_cs_rank`` : 当日该因子在全体股票中的百分比排名
@@ -193,20 +265,38 @@ def build_panel_features(
     df = _check_input(df)
 
     parts = []
+    base_feature_specs = None
     # sort=False：数据已按 ts_code 排序，跳过 groupby 内部重复排序
     for _, g in df.groupby("ts_code", sort=False):
-        parts.append(build_features_for_one_symbol(g, cfg))
-
+        feature_df, feature_specs = build_features_for_one_symbol(g, cfg)
+        current = feature_specs
+        if base_feature_specs is None:
+            base_feature_specs = current
+        elif current != base_feature_specs:
+            raise ValueError(
+                f"Feature schema mismatch for ts_code={g['ts_code'].iloc[0]}: "
+                f"expected {base_feature_specs}, got {current}"
+            )
+        parts.append(feature_df)
+    if base_feature_specs is None:
+        # 输入 DataFrame 为空，返回空的特征 DataFrame 和空的 schema
+        return df.iloc[0:0].copy(), []
+    
+    collector = FeatureSchemaCollector()
+    collector.extend(base_feature_specs)
     feat = pd.concat(parts, axis=0, ignore_index=True)
-    feat = feat.sort_values(["date", "ts_code"]).reset_index(drop=True)
-    return _add_cross_sectional_features(feat, cfg)
+    feat = feat.sort_values(["ts_code", "date"]).reset_index(drop=True)
+    feat, feature_specs = _add_cross_sectional_features(feat, cfg)
+    collector.extend(feature_specs)
+
+    return feat, collector.to_list()
 
 
 def build_panel_features_multiprocess(
     df: pd.DataFrame,
     cfg: Optional[FeatureConfig] = None,
     num_workers: Optional[int] = None,
-) -> pd.DataFrame:
+) -> tuple[pd.DataFrame, list[FeatureSpec]]:
     """多进程版 panel 特征工程。
 
     处理流程与 ``build_panel_features`` 一致，但会将每只股票的
@@ -229,8 +319,8 @@ def build_panel_features_multiprocess(
     df = _check_input(df)
 
     groups = [g for _, g in df.groupby("ts_code", sort=False)]
-    if not groups:
-        return _add_cross_sectional_features(df.iloc[0:0].copy(), cfg)
+    # if not groups:
+    #     return _add_cross_sectional_features(df.iloc[0:0].copy(), cfg)
 
     max_workers = num_workers or max(1, (os.cpu_count() or 1) - 1)
     worker_count = max(1, min(max_workers, len(groups)))
@@ -245,74 +335,71 @@ def build_panel_features_multiprocess(
             tasks,
             chunksize=chunksize
         ))
+    features, feature_specs_list = zip(*parts)
+    base_feature_specs = None
+    for i, specs in enumerate(feature_specs_list):
+        current = specs
+        if i == 0:
+            base_feature_specs = current
+        elif current != base_feature_specs:
+            raise ValueError(
+                f"Feature schema mismatch in worker {i}: "
+                f"expected {base_feature_specs}, got {current}"
+            )
+    if base_feature_specs is None:
+        return df.iloc[0:0].copy(), []
+    
+    collector = FeatureSchemaCollector()
+    collector.extend(base_feature_specs)
+    feat = pd.concat(features, axis=0, ignore_index=True)
+    feat = feat.sort_values(["ts_code", "date"]).reset_index(drop=True)
+    feat, feature_specs = _add_cross_sectional_features(feat, cfg)
+    collector.extend(feature_specs)
 
-    feat = pd.concat(parts, axis=0, ignore_index=True)
-    feat = feat.sort_values(["date", "ts_code"]).reset_index(drop=True)
-    return _add_cross_sectional_features(feat, cfg)
+    return feat, collector.to_list()
+
+
+def pipeline(df: pd.DataFrame, cfg: Optional[FeatureConfig] = None) -> pd.DataFrame:
+    """特征工程完整 pipeline，包含单股票特征构造和横截面标准化。"""
+    with_features_df = build_panel_features_multiprocess(df, cfg)
+    with_feat_targets_df, target_columns = add_targets(with_features_df)
+    selected_cols = select_lstm_feature_columns(with_feat_targets_df)
+    return with_feat_targets_df[["ts_code", "date"] + selected_cols]
 
 
 if __name__ == "__main__":
-    # 简单测试：加载原始数据，构造特征，检查输出
-    from alpha_arena.data.loader import load_from_parquet
-    
-    # 测试单只股票特征构造
-    file_name = "csi300_stocks_2017_2025.parquet"
-    df = load_from_parquet(file_name)
+    import warnings
+    import time
+    from pandas.testing import assert_frame_equal
 
-    # sample_symbol = df["ts_code"].iloc[0]
-    # sample_df = df[df["ts_code"] == sample_symbol].copy()
+    from alpha_arena.data.loader import load_from_parquet
+    from alpha_arena.features.config import FeatureConfig
+
+    df = load_from_parquet("csi300_stocks_2017_2025.parquet")
     cfg = FeatureConfig(
+        price_windows=(3, 5, 10, 20),
+        vol_windows=(3, 5, 10, 20),
+        zscore_windows=(5,),
+        cross_sectional_rank=True,
+        add_time_features=True,
+        add_risk_adjusted_features=True,
         add_ta_features=True,
         add_pandas_ta_features=True,
-        add_time_features=True,
-        zscore_windows=[20],
         fill_method="ffill",
-        cross_sectional_rank=True,
+        clip_return=0.2,
     )
-    # feat = build_features_for_one_symbol(sample_df, cfg)
-    # print(f"单只股票特征构造完成，样本行数: {len(feat)}, 特征列数: {len(feat.columns)}")
-    # print("示例特征列:", feat.columns.tolist()[:10])
-
-    # # 测试 panel 级特征构造
-    # test_df = df[df["date"] >= "20230101"].copy()  # 取部分数据加快测试
-    # panel_feat = build_panel_features(test_df, cfg)
-    # import pdb; pdb.set_trace()  # --- IGNORE ---
-    # print(f"Panel 级特征构造完成，样本行数: {len(panel_feat)}, 特征列数: {len(panel_feat.columns)}")
-    # print("示例特征列:", panel_feat.columns.tolist()[:10])
-
-    # 对比测试多进程 panel 级特征构造记录时间，并与单进程结果对比
-    import time
-    test_df = df[df["date"] >= "20230101"].copy()  # 取部分数据加快测试
-    t0 = time.perf_counter()
-    panel_feat_mp = build_panel_features_multiprocess(test_df, cfg)
-    t1 = time.perf_counter()
-    elapsed_mp = t1 - t0
-    print(f"多进程 Panel 级特征构造完成，样本行数: {len(panel_feat_mp)}, 特征列数: {len(panel_feat_mp.columns)}")
-    print("示例特征列:", panel_feat_mp.columns.tolist()[:10])
-    print(f"多进程耗时: {elapsed_mp:.2f} 秒")
-
-    # 单进程与多进程结果对比
-    # 注意：由于涉及浮点数计算和多进程调度，结果可能存在微小差异，以下对比允许一定的数值误差。
-    t0 = time.perf_counter()
-    panel_feat_single = build_panel_features(test_df, cfg)
-    t1 = time.perf_counter()
-    elapsed_single = t1 - t0
-    print(f"单进程 Panel 级特征构造完成，样本行数: {len(panel_feat_single)}, 特征列数: {len(panel_feat_single.columns)}")
-    print("示例特征列:", panel_feat_single.columns.tolist()[:10])
-    print(f"单进程耗时: {elapsed_single:.2f} 秒")
-    # 对比数值列，允许微小误差
-    numeric_cols = [c for c in panel_feat_single.columns if pd.api.types.is_numeric_dtype(panel_feat_single[c])]
-    for col in numeric_cols:
-        if col in panel_feat_mp.columns:
-            s1 = panel_feat_single[col]
-            s2 = panel_feat_mp[col]
-            if not s1.equals(s2):
-                diff = (s1 - s2).abs()
-                max_diff = diff.max()
-                if max_diff > 1e-6:
-                    print(f"列 {col} 存在差异，最大绝对差异: {max_diff:.2e}")
-                else:
-                    print(f"列 {col} 数值基本一致，最大绝对差异: {max_diff:.2e}")
-    
-
-    
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        t0 = time.perf_counter()
+        panel_feat_mp = build_panel_features_multiprocess(df, cfg)
+        from alpha_arena.features.targets import add_targets
+        panel_feat_with_targtes, target_columns = add_targets(panel_feat_mp)
+        t1 = time.perf_counter()
+        print(f"Time elapsed: {t1 - t0:.2f} seconds")
+        print(panel_feat_with_targtes.columns.to_list())
+        print(panel_feat_with_targtes.shape)
+        print(panel_feat_with_targtes.head())
+        print(panel_feat_with_targtes.tail())
+        from alpha_arena.features.selector import select_lstm_feature_columns
+        selected_cols = select_lstm_feature_columns(panel_feat_with_targtes)
+        print("Selected feature columns:", selected_cols)

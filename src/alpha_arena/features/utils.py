@@ -22,7 +22,7 @@ def _check_input(df: pd.DataFrame) -> pd.DataFrame:
     """校验输入 DataFrame 并做基础规范化。
 
     检查必要列是否存在，将 date 列转为 datetime 类型，
-    并按 (symbol, date) 升序排序，保证后续时序操作的正确性。
+    并按 (ts_code, date) 升序排序，保证后续时序操作的正确性。
 
     Parameters
     ----------

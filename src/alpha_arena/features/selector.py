@@ -38,17 +38,24 @@ _FEATURE_PREFIXES = (
 )
 
 # 即使前缀匹配，也排除含以下关键词的列（横截面特征不直接输入 LSTM）
-_EXCLUDE_KEYWORDS = ("_cs_rank", "_cs_z")
+# _EXCLUDE_KEYWORDS = ("_cs_rank", "_cs_z")
+_EXCLUDE_KEYWORDS = []
 
 # 始终排除的原始列
-_RAW_COLS = frozenset({"symbol", "date", "open", "high", "low", "close", "volume"})
+_RAW_COLS = frozenset({"ts_code", "date", "open", "high", "low", "close", "volume", "pre_close", "change", "pct_chg", "amount", "in_csi300"})
 
 
-def select_lstm_feature_columns(df: pd.DataFrame) -> List[str]:
+def select_lstm_feature_columns(
+    df: pd.DataFrame,
+    target_columns: tuple[str, ...],
+    feature_prefixes: tuple[str, ...] | None = None,
+    exclude_keywords: tuple[str, ...] | None = None,
+
+) -> List[str]:
     """从 feature DataFrame 中筛选适合 LSTM 输入的特征列名。
 
     筛选规则（按优先级）：
-    1. 排除 ``symbol / date / open / high / low / close / volume``（原始价格列
+    1. 排除 ``ts_code / date / open / high / low / close / volume``（原始价格列
        量纲差异大，直接输入会干扰 LSTM 学习，建议归一化后另行处理）。
     2. 排除包含 ``_cs_rank`` 或 ``_cs_z`` 的横截面列
        （横截面特征依赖同期其他股票，推理时难以保证实时可用；
@@ -73,13 +80,17 @@ def select_lstm_feature_columns(df: pd.DataFrame) -> List[str]:
     >>> feat_cols = select_lstm_feature_columns(panel_df)
     >>> X = panel_df[feat_cols].values  # shape: (N, len(feat_cols))
     """
+    exclude_keywords = exclude_keywords or []
+    feature_prefixes = feature_prefixes or []
     cols = []
     for c in df.columns:
         if c in _RAW_COLS:
             continue
-        if any(k in c for k in _EXCLUDE_KEYWORDS):
+        if any(k in c for k in exclude_keywords):
             continue
-        if any(c.startswith(p) for p in _FEATURE_PREFIXES):
+        if c in target_columns:
+            continue
+        if (feature_prefixes and any(c.startswith(p) for p in feature_prefixes)) or not feature_prefixes:
             cols.append(c)
 
     return sorted(cols)

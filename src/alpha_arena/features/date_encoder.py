@@ -1,5 +1,6 @@
 import numpy as np
 import pandas as pd
+from alpha_arena.features.config import FeatureSpec
 
 
 def _add_time_features(df, date_col='date'):
@@ -12,6 +13,23 @@ def _add_time_features(df, date_col='date'):
     doy = dt.dt.dayofyear
     dom = dt.dt.day
 
+    feature_specs = [
+        FeatureSpec(name='dow_sin', kind='cyclic', dtype='float32'),
+        FeatureSpec(name='dow_cos', kind='cyclic', dtype='float32'),
+        FeatureSpec(name='month_sin', kind='cyclic', dtype='float32'),
+        FeatureSpec(name='month_cos', kind='cyclic', dtype='float32'),
+        FeatureSpec(name='doy_sin', kind='cyclic', dtype='float32'),
+        FeatureSpec(name='doy_cos', kind='cyclic', dtype='float32'),
+        FeatureSpec(name='dom_sin', kind='cyclic', dtype='float32'),
+        FeatureSpec(name='dom_cos', kind='cyclic', dtype='float32'),
+        FeatureSpec(name='is_month_start', kind='boolean', dtype='int8'),
+        FeatureSpec(name='is_month_end', kind='boolean', dtype='int8'),
+        FeatureSpec(name='is_quarter_start', kind='boolean', dtype='int8'),
+        FeatureSpec(name='is_quarter_end', kind='boolean', dtype='int8'),
+        FeatureSpec(name='is_year_start', kind='boolean', dtype='int8'),
+        FeatureSpec(name='is_year_end', kind='boolean', dtype='int8'),
+        FeatureSpec(name='gap_days', kind='other', dtype='int16'),
+    ]
     # cyclic encodings
     df['dow_sin'] = np.sin(2 * np.pi * dow / 5.0)
     df['dow_cos'] = np.cos(2 * np.pi * dow / 5.0)
@@ -47,4 +65,4 @@ def _add_time_features(df, date_col='date'):
         'gap_days',
     ]
 
-    return df, time_feature_cols
+    return df, time_feature_cols, feature_specs

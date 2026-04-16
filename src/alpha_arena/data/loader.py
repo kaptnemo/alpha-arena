@@ -22,12 +22,13 @@ def is_full_path(path_str: str) -> bool:
     return False
 
 
-def load_from_parquet(file_path: str, **kwargs):
+def load_from_parquet(file_path: str | Path, **kwargs):
     """Load data from a parquet file and return a DataFrame."""
-    if Path(file_path).suffix != '.parquet':
+    file_path = Path(file_path)
+    if file_path.suffix != '.parquet':
         raise ValueError("Unsupported file format. Only parquet files are supported.")
-    if is_full_path(file_path):
-        logger.info("Loading data from specified file path", file_path=file_path)
+    if is_full_path(str(file_path)):
+        logger.info("Loading data from specified file path", file_path=str(file_path))
     else:
         file_path = RAW_DATA_DIR / file_path
         logger.info("Loading data from RAW_DATA_DIR", file_path=file_path)
@@ -37,8 +38,10 @@ def load_from_parquet(file_path: str, **kwargs):
 
 
 if __name__ == "__main__":
+    from alpha_arena.data import DATASET_DATA_DIR
     # Example usage
-    new_file_path = RAW_DATA_DIR / "csi300_stocks_2017_2025.parquet"
+    new_file_path = DATASET_DATA_DIR / "csi300_2017_2025_seq60_step5_targets_5_10_20_label_y_ret_5_train_metadata.parquet"
     df = load_from_parquet(new_file_path)
+    import pdb; pdb.set_trace()
     print(df.head())
     print(df.tail())

@@ -7,3 +7,6 @@ __pycache__
 #log
 *.log
 logs/
+
+.pytest_cache/
+.vscode/

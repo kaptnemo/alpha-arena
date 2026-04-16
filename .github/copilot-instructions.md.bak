@@ -28,7 +28,7 @@ Default input:
    - no random shuffling across time
 
 3. **Panel data assumption**
-   - indexed by `date` and `symbol`
+   - indexed by `date` and `ts_code`
    - do not mix samples across time incorrectly
 
 ---
