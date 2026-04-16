@@ -1,0 +1,42 @@
+[project]
+name = "alpha-arena"
+version = "0.1.0"
+description = ""
+authors = [
+    {name = "chenyiwei"}
+]
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "pandas (>=3.0.2,<4.0.0)",
+    "pyarrow (>=23.0.1,<24.0.0)",
+    "baostock (>=0.8.9,<0.9.0)",
+    "pymongo (>=4.16.0,<5.0.0)",
+    "typer (>=0.24.1,<0.25.0)",
+    "tushare (>=1.4.29,<2.0.0)",
+    "structlog (>=25.5.0,<26.0.0)",
+    "stockstats (>=0.6.8,<0.7.0)",
+    "torch (==2.5.1)",
+    "torchvision (==0.20.1)",
+    "torchaudio (==2.5.1)",
+    "pandas-ta-classic (>=0.4.47,<0.5.0)",
+    "ta (>=0.11.0,<0.12.0)",
+]
+
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"
+
+[project.scripts]
+arena_cli = "alpha_arena.cli.main:app"
+
+[[tool.poetry.source]]
+name = "pytorch-cu118"
+url = "https://download.pytorch.org/whl/cu118/"
+priority = "explicit"
+
+
+[tool.poetry.dependencies]
+torch = {source = "pytorch-cu118"}
+torchvision = {source = "pytorch-cu118"}
+torchaudio = {source = "pytorch-cu118"}

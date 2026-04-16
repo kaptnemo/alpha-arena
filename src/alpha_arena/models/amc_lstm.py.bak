@@ -1,0 +1,613 @@
+import math
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Tuple
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+
+@dataclass
+class MemoryCacheConfig:
+    hidden_dim: int
+    segment_len: int = 16
+    cache_mode: str = "gated_residual"   # ["residual", "gated_residual", "mean", "topk_gated"]
+    max_cached_segments: Optional[int] = None
+    topk: int = 4
+    dropout: float = 0.1
+    use_segment_context: bool = True     # use segment pooled context for relevance
+    detach_cached_memory: bool = False   # save GPU / stabilize training for long seq
+
+
+class SegmentMemoryRetriever(nn.Module):
+    """
+    Retrieve from cached segment memories.
+
+    Cached item for each segment:
+        - memory_vec: [B, H]      (e.g. final hidden state of that segment)
+        - segment_ctx: [B, H]     (e.g. mean pooled token states of that segment)
+
+    Query:
+        - q_t: [B, H] current online hidden state
+
+    Returns:
+        retrieved: [B, H]
+        weights:   [B, S] or [B, K]
+        aux: dict
+    """
+
+    def __init__(self, cfg: MemoryCacheConfig):
+        super().__init__()
+        self.cfg = cfg
+        h = cfg.hidden_dim
+
+        self.query_proj = nn.Linear(h, h, bias=False)
+        self.key_proj = nn.Linear(h, h, bias=False)
+        self.value_proj = nn.Linear(h, h, bias=False)
+
+        # Used in gated residual variant
+        self.gate_net = nn.Sequential(
+            nn.Linear(h * 3, h),
+            nn.ReLU(),
+            nn.Dropout(cfg.dropout),
+            nn.Linear(h, h),
+            nn.Sigmoid(),
+        )
+
+        self.out_proj = nn.Sequential(
+            nn.Linear(h, h),
+            nn.Dropout(cfg.dropout),
+        )
+
+    def _stack_cache(
+        self,
+        cached_memory: List[torch.Tensor],
+        cached_context: Optional[List[torch.Tensor]] = None,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        """
+        cached_memory: list of S tensors, each [B, H]
+        cached_context: list of S tensors, each [B, H]
+        returns:
+            mem: [B, S, H]
+            ctx: [B, S, H] or None
+        """
+        mem = torch.stack(cached_memory, dim=1)  # [B, S, H]
+        ctx = None
+        if cached_context is not None and len(cached_context) > 0:
+            ctx = torch.stack(cached_context, dim=1)  # [B, S, H]
+        return mem, ctx
+
+    def _relevance_scores(
+        self,
+        query: torch.Tensor,              # [B, H]
+        memory_bank: torch.Tensor,        # [B, S, H]
+        context_bank: Optional[torch.Tensor] = None,  # [B, S, H]
+    ) -> torch.Tensor:
+        """
+        Context-aware relevance score, inspired by the paper's segment-conditioned selection.
+        """
+        q = self.query_proj(query).unsqueeze(1)  # [B, 1, H]
+
+        if self.cfg.use_segment_context and context_bank is not None:
+            keys = self.key_proj(context_bank)   # [B, S, H]
+        else:
+            keys = self.key_proj(memory_bank)    # [B, S, H]
+
+        scores = torch.sum(q * keys, dim=-1) / math.sqrt(query.size(-1))  # [B, S]
+        return scores
+
+    def forward(
+        self,
+        query: torch.Tensor,                     # [B, H]
+        cached_memory: List[torch.Tensor],       # len = S, each [B, H]
+        cached_context: Optional[List[torch.Tensor]] = None,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Dict[str, torch.Tensor]]:
+        device = query.device
+        batch_size, hidden_dim = query.shape
+
+        if len(cached_memory) == 0:
+            zero = torch.zeros(batch_size, hidden_dim, device=device, dtype=query.dtype)
+            return zero, None, {
+                "cache_scores": None,
+                "cache_indices": None,
+            }
+
+        memory_bank, context_bank = self._stack_cache(cached_memory, cached_context)  # [B, S, H]
+        scores = self._relevance_scores(query, memory_bank, context_bank)              # [B, S]
+
+        mode = self.cfg.cache_mode
+
+        if mode in {"residual", "gated_residual", "mean"}:
+            attn = torch.softmax(scores, dim=-1)  # [B, S]
+            values = self.value_proj(memory_bank) # [B, S, H]
+            retrieved = torch.sum(attn.unsqueeze(-1) * values, dim=1)  # [B, H]
+
+            if mode == "mean":
+                out = self.out_proj(retrieved)
+                return out, attn, {
+                    "cache_scores": scores,
+                    "cache_indices": None,
+                }
+
+            if mode == "residual":
+                out = self.out_proj(query + retrieved)
+                return out, attn, {
+                    "cache_scores": scores,
+                    "cache_indices": None,
+                }
+
+            # gated_residual
+            gate_in = torch.cat([query, retrieved, query - retrieved], dim=-1)  # [B, 3H]
+            gate = self.gate_net(gate_in)                                        # [B, H]
+            fused = gate * query + (1.0 - gate) * retrieved
+            out = self.out_proj(fused)
+            return out, attn, {
+                "cache_scores": scores,
+                "cache_indices": None,
+                "gate": gate,
+            }
+
+        elif mode == "topk_gated":
+            k = min(self.cfg.topk, scores.size(1))
+            topk_scores, topk_idx = torch.topk(scores, k=k, dim=-1)  # [B, K], [B, K]
+
+            values = self.value_proj(memory_bank)  # [B, S, H]
+            gather_idx = topk_idx.unsqueeze(-1).expand(-1, -1, values.size(-1))  # [B, K, H]
+            topk_values = torch.gather(values, dim=1, index=gather_idx)           # [B, K, H]
+
+            topk_attn = torch.softmax(topk_scores, dim=-1)                        # [B, K]
+            retrieved = torch.sum(topk_attn.unsqueeze(-1) * topk_values, dim=1)   # [B, H]
+
+            gate_in = torch.cat([query, retrieved, query - retrieved], dim=-1)
+            gate = self.gate_net(gate_in)
+            fused = gate * query + (1.0 - gate) * retrieved
+            out = self.out_proj(fused)
+
+            return out, topk_attn, {
+                "cache_scores": scores,
+                "cache_indices": topk_idx,
+                "gate": gate,
+            }
+
+        else:
+            raise ValueError(f"Unsupported cache_mode: {mode}")
+
+
+class MemoryCachingLSTM(nn.Module):
+    """
+    Mechanism-faithful LSTM adaptation of Memory Caching.
+
+    Core idea:
+        - Run an LSTM online over tokens
+        - Split sequence into segments
+        - Cache one checkpoint per past segment
+        - For each token, combine:
+            online hidden state h_t
+            +
+            retrieval from all cached segment memories
+        - Return enhanced token states
+
+    Input:
+        x: [B, T, F]
+
+    Output dict:
+        {
+            "sequence_output": [B, T, H]
+            "final_hidden": [B, H]
+            "cache_weights": list of length T, each [B, S_t] or [B, K]
+            "cache_aux": list[dict]
+        }
+    """
+
+    def __init__(
+        self,
+        input_dim: int,
+        hidden_dim: int,
+        num_layers: int = 1,
+        dropout: float = 0.0,
+        bidirectional: bool = False,
+        cache_cfg: Optional[MemoryCacheConfig] = None,
+    ):
+        super().__init__()
+
+        if bidirectional:
+            raise ValueError("MemoryCachingLSTM is intended for causal / chronological modeling. Set bidirectional=False.")
+
+        self.input_dim = input_dim
+        self.hidden_dim = hidden_dim
+        self.num_layers = num_layers
+
+        self.input_proj = nn.Sequential(
+            nn.Linear(input_dim, input_dim),
+            nn.LayerNorm(input_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+        )
+
+        self.cell = nn.LSTMCell(input_dim, hidden_dim)
+
+        self.state_dropout = nn.Dropout(dropout)
+
+        self.cache_cfg = cache_cfg or MemoryCacheConfig(hidden_dim=hidden_dim)
+        if self.cache_cfg.hidden_dim != hidden_dim:
+            raise ValueError("cache_cfg.hidden_dim must equal hidden_dim")
+
+        self.retriever = SegmentMemoryRetriever(self.cache_cfg)
+
+        self.fuse_current = nn.Sequential(
+            nn.Linear(hidden_dim * 2, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+        )
+
+    def _truncate_cache(
+        self,
+        cached_memory: List[torch.Tensor],
+        cached_context: List[torch.Tensor],
+    ) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
+        max_cached = self.cache_cfg.max_cached_segments
+        if max_cached is None or len(cached_memory) <= max_cached:
+            return cached_memory, cached_context
+        return cached_memory[-max_cached:], cached_context[-max_cached:]
+
+    def forward(
+        self,
+        x: torch.Tensor,                 # [B, T, F]
+        hx: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+    ) -> Dict[str, object]:
+        B, T, F = x.shape
+        device = x.device
+        dtype = x.dtype
+
+        x = self.input_proj(x)
+
+        if hx is None:
+            h_t = torch.zeros(B, self.hidden_dim, device=device, dtype=dtype)
+            c_t = torch.zeros(B, self.hidden_dim, device=device, dtype=dtype)
+        else:
+            h_t, c_t = hx
+
+        seg_len = self.cache_cfg.segment_len
+
+        outputs: List[torch.Tensor] = []
+        cache_weights: List[Optional[torch.Tensor]] = []
+        cache_aux: List[Dict[str, torch.Tensor]] = []
+
+        cached_memory: List[torch.Tensor] = []
+        cached_context: List[torch.Tensor] = []
+
+        # For the current segment, collect online hidden states
+        current_segment_states: List[torch.Tensor] = []
+
+        for t in range(T):
+            x_t = x[:, t, :]  # [B, F]
+
+            # 1) Online recurrent update
+            h_t, c_t = self.cell(x_t, (h_t, c_t))
+            h_t = self.state_dropout(h_t)
+
+            # 2) Retrieve from cached segment checkpoints (past segments only)
+            retrieved_t, weights_t, aux_t = self.retriever(
+                query=h_t,
+                cached_memory=cached_memory,
+                cached_context=cached_context if len(cached_context) > 0 else None,
+            )
+
+            # 3) Fuse online state with retrieved cache context
+            enhanced_t = self.fuse_current(torch.cat([h_t, retrieved_t], dim=-1))  # [B, H]
+
+            outputs.append(enhanced_t)
+            cache_weights.append(weights_t)
+            cache_aux.append(aux_t)
+
+            # 4) Accumulate states within current segment
+            current_segment_states.append(h_t)
+
+            # 5) At segment boundary, cache one checkpoint
+            segment_end = ((t + 1) % seg_len == 0) or (t == T - 1)
+            if segment_end:
+                seg_states = torch.stack(current_segment_states, dim=1)  # [B, Ls, H]
+
+                # checkpoint memory = final online hidden of this segment
+                seg_memory = seg_states[:, -1, :]                        # [B, H]
+
+                # segment context = pooled representation for contextual selection
+                seg_context = seg_states.mean(dim=1)                     # [B, H]
+
+                if self.cache_cfg.detach_cached_memory:
+                    seg_memory = seg_memory.detach()
+                    seg_context = seg_context.detach()
+
+                cached_memory.append(seg_memory)
+                cached_context.append(seg_context)
+
+                cached_memory, cached_context = self._truncate_cache(cached_memory, cached_context)
+                current_segment_states = []
+
+        sequence_output = torch.stack(outputs, dim=1)  # [B, T, H]
+
+        return {
+            "sequence_output": sequence_output,
+            "final_hidden": sequence_output[:, -1, :],
+            "final_cell": c_t,
+            "cache_weights": cache_weights,
+            "cache_aux": cache_aux,
+            "num_cached_segments": len(cached_memory),
+        }
+
+
+class MultiLayerMemoryCachingLSTM(nn.Module):
+    """
+    Multi-layer version of MemoryCachingLSTM.
+
+    Design:
+        - Stack multiple LSTMCell layers
+        - Only apply memory caching on the top layer
+        - Cache segment checkpoints from the top-layer hidden states
+
+    Input:
+        x: [B, T, F]
+
+    Output dict:
+        {
+            "sequence_output": [B, T, H]
+            "final_hidden": [B, H]
+            "final_cell": [B, H]
+            "all_layer_hidden": List[[B, H]]
+            "all_layer_cell": List[[B, H]]
+            "cache_weights": list of length T, each [B, S_t] or [B, K]
+            "cache_aux": list[dict]
+            "num_cached_segments": int
+        }
+    """
+
+    def __init__(
+        self,
+        input_dim: int,
+        hidden_dim: int,
+        num_layers: int = 2,
+        dropout: float = 0.0,
+        bidirectional: bool = False,
+        cache_cfg: Optional["MemoryCacheConfig"] = None,
+    ):
+        super().__init__()
+
+        if bidirectional:
+            raise ValueError(
+                "MultiLayerMemoryCachingLSTM is intended for causal / chronological modeling. "
+                "Set bidirectional=False."
+            )
+        if num_layers < 1:
+            raise ValueError("num_layers must be >= 1")
+
+        self.input_dim = input_dim
+        self.hidden_dim = hidden_dim
+        self.num_layers = num_layers
+
+        self.input_proj = nn.Sequential(
+            nn.Linear(input_dim, input_dim),
+            nn.LayerNorm(input_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+        )
+
+        self.cells = nn.ModuleList()
+        for layer_idx in range(num_layers):
+            layer_input_dim = input_dim if layer_idx == 0 else hidden_dim
+            self.cells.append(nn.LSTMCell(layer_input_dim, hidden_dim))
+
+        self.state_dropout = nn.Dropout(dropout)
+
+        self.cache_cfg = cache_cfg or MemoryCacheConfig(hidden_dim=hidden_dim)
+        if self.cache_cfg.hidden_dim != hidden_dim:
+            raise ValueError("cache_cfg.hidden_dim must equal hidden_dim")
+
+        self.retriever = SegmentMemoryRetriever(self.cache_cfg)
+
+        self.fuse_current = nn.Sequential(
+            nn.Linear(hidden_dim * 2, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+        )
+
+    def _truncate_cache(
+        self,
+        cached_memory: List[torch.Tensor],
+        cached_context: List[torch.Tensor],
+    ) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
+        max_cached = self.cache_cfg.max_cached_segments
+        if max_cached is None or len(cached_memory) <= max_cached:
+            return cached_memory, cached_context
+        return cached_memory[-max_cached:], cached_context[-max_cached:]
+
+    def _init_states(
+        self,
+        batch_size: int,
+        device: torch.device,
+        dtype: torch.dtype,
+        hx: Optional[Tuple[List[torch.Tensor], List[torch.Tensor]]],
+    ) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
+        if hx is None:
+            h_list = [
+                torch.zeros(batch_size, self.hidden_dim, device=device, dtype=dtype)
+                for _ in range(self.num_layers)
+            ]
+            c_list = [
+                torch.zeros(batch_size, self.hidden_dim, device=device, dtype=dtype)
+                for _ in range(self.num_layers)
+            ]
+        else:
+            h_list, c_list = hx
+            if len(h_list) != self.num_layers or len(c_list) != self.num_layers:
+                raise ValueError("hx must contain num_layers hidden states and cell states")
+        return h_list, c_list
+
+    def forward(
+        self,
+        x: torch.Tensor,  # [B, T, F]
+        hx: Optional[Tuple[List[torch.Tensor], List[torch.Tensor]]] = None,
+    ) -> Dict[str, object]:
+        B, T, _ = x.shape
+        device = x.device
+        dtype = x.dtype
+
+        x = self.input_proj(x)
+        h_list, c_list = self._init_states(B, device, dtype, hx)
+
+        seg_len = self.cache_cfg.segment_len
+
+        outputs: List[torch.Tensor] = []
+        cache_weights: List[Optional[torch.Tensor]] = []
+        cache_aux: List[Dict[str, torch.Tensor]] = []
+
+        cached_memory: List[torch.Tensor] = []
+        cached_context: List[torch.Tensor] = []
+
+        current_segment_states: List[torch.Tensor] = []
+
+        for t in range(T):
+            layer_input = x[:, t, :]  # [B, F]
+
+            # 1) Multi-layer recurrent update
+            for layer_idx, cell in enumerate(self.cells):
+                h_t, c_t = cell(layer_input, (h_list[layer_idx], c_list[layer_idx]))
+                h_t = self.state_dropout(h_t)
+
+                h_list[layer_idx] = h_t
+                c_list[layer_idx] = c_t
+
+                layer_input = h_t
+
+            # top layer hidden state
+            top_h_t = h_list[-1]
+
+            # 2) Retrieve from cached segment checkpoints using top-layer state
+            retrieved_t, weights_t, aux_t = self.retriever(
+                query=top_h_t,
+                cached_memory=cached_memory,
+                cached_context=cached_context if len(cached_context) > 0 else None,
+            )
+
+            # 3) Fuse online top-layer state with retrieved memory context
+            enhanced_t = self.fuse_current(torch.cat([top_h_t, retrieved_t], dim=-1))  # [B, H]
+
+            outputs.append(enhanced_t)
+            cache_weights.append(weights_t)
+            cache_aux.append(aux_t)
+
+            # 4) Accumulate top-layer states within current segment
+            current_segment_states.append(top_h_t)
+
+            # 5) Cache one checkpoint at segment boundary
+            segment_end = ((t + 1) % seg_len == 0) or (t == T - 1)
+            if segment_end:
+                seg_states = torch.stack(current_segment_states, dim=1)  # [B, Ls, H]
+
+                seg_memory = seg_states[:, -1, :]    # [B, H]
+                seg_context = seg_states.mean(dim=1) # [B, H]
+
+                if self.cache_cfg.detach_cached_memory:
+                    seg_memory = seg_memory.detach()
+                    seg_context = seg_context.detach()
+
+                cached_memory.append(seg_memory)
+                cached_context.append(seg_context)
+
+                cached_memory, cached_context = self._truncate_cache(
+                    cached_memory, cached_context
+                )
+                current_segment_states = []
+
+        sequence_output = torch.stack(outputs, dim=1)  # [B, T, H]
+
+        return {
+            "sequence_output": sequence_output,
+            "final_hidden": sequence_output[:, -1, :],
+            "final_cell": c_list[-1],
+            "all_layer_hidden": h_list,
+            "all_layer_cell": c_list,
+            "cache_weights": cache_weights,
+            "cache_aux": cache_aux,
+            "num_cached_segments": len(cached_memory),
+        }
+
+
+class AttentionEnhancedDualHeadAMC(nn.Module):
+    def __init__(
+        self,
+        input_dim: int,
+        hidden_dim: int = 128,
+        head_hidden_dim: int = 64,
+        dropout: float = 0.1,
+        segment_len: int = 10,
+    ):
+        super().__init__()
+
+        cache_cfg = MemoryCacheConfig(
+            hidden_dim=hidden_dim,
+            segment_len=segment_len,
+            cache_mode="gated_residual",
+            max_cached_segments=12,
+            topk=4,
+            dropout=dropout,
+            use_segment_context=True,
+        )
+
+        self.mc_rnn = MemoryCachingLSTM(
+            input_dim=input_dim,
+            hidden_dim=hidden_dim,
+            dropout=dropout,
+            cache_cfg=cache_cfg,
+        )
+
+        self.temporal_attn = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.Tanh(),
+            nn.Linear(hidden_dim, 1, bias=False),
+        )
+
+        self.fusion = nn.Sequential(
+            nn.Linear(hidden_dim * 2, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+        )
+
+        self.return_head = nn.Sequential(
+            nn.Linear(hidden_dim, head_hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(head_hidden_dim, 1),
+        )
+
+        self.risk_head = nn.Sequential(
+            nn.Linear(hidden_dim, head_hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(head_hidden_dim, 1),
+        )
+
+    def forward(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
+        out = self.mc_rnn(x)
+        seq = out["sequence_output"]  # [B, T, H]
+
+        scores = self.temporal_attn(seq).squeeze(-1)    # [B, T]
+        attn = torch.softmax(scores, dim=1)
+        context = torch.sum(seq * attn.unsqueeze(-1), dim=1)  # [B, H]
+
+        final_hidden = out["final_hidden"]  # [B, H]
+        features = self.fusion(torch.cat([context, final_hidden], dim=-1))
+
+        pred_return = self.return_head(features).squeeze(-1)
+        pred_logvar = self.risk_head(features).squeeze(-1).clamp(-10, 10)
+
+        return {
+            "pred_return": pred_return,
+            "pred_logvar": pred_logvar,
+            "pred_var": torch.exp(pred_logvar),
+            "attn_weights": attn,
+            "cache_weights": out["cache_weights"],
+            "features": features,
+        }

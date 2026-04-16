@@ -1,0 +1,101 @@
+# Copilot Instructions
+
+This repository is a **financial time-series research project** for CSI 300 stock modeling.
+
+## Model Overview
+Main model:
+- shared LSTM encoder
+- temporal attention mechanism
+- dual heads:
+  - regression head → future return
+  - classification head → future direction
+- optional memory caching module
+
+Default input:
+- tensor shape: [batch, seq_len, feature_dim]
+
+---
+
+## Critical Rules (MUST FOLLOW)
+
+1. **No data leakage**
+   - no look-ahead bias
+   - no future information in features
+   - no fitting preprocessors on full dataset
+
+2. **Time-series safe**
+   - chronological train/val/test split only
+   - no random shuffling across time
+
+3. **Panel data assumption**
+   - indexed by `date` and `symbol`
+   - do not mix samples across time incorrectly
+
+---
+
+## Code Style
+
+- Use **Python + PyTorch**
+- Keep code **modular** under:
+  - `amc-lstm/data`, `amc-lstm/models`, `amc-lstm/train`, `amc-lstm/eval`, `amc-lstm/backtest`, `amc-lstm/utils`
+- Prefer **readable, explicit code**
+- Use:
+  - `pathlib` for paths
+  - `logging` instead of print
+- Add **docstrings for non-trivial code**
+- Annotate key **tensor shapes** in model code
+
+---
+
+## Model Expectations
+
+- LSTM uses `batch_first=True`
+- Attention:
+  - operates over sequence
+  - outputs context + attention weights
+- Dual heads:
+  - separate layers for regression and classification
+- Memory cache:
+  - isolated module
+  - easy to enable/disable
+
+---
+
+## Training Rules
+
+- Multi-task loss:
+  - regression (MSE or Huber)
+  - classification (BCEWithLogits or CE)
+- Support configurable loss weights
+- Save best model by validation metric
+- Log per-task loss
+- Use specific random seeds for reproducibility
+
+---
+
+## Evaluation Preferences
+
+Include both ML and quant metrics:
+- Regression: MAE, RMSE
+- Classification: Accuracy, F1, AUC
+- Quant:
+  - IC / Rank IC
+  - quantile grouping
+  - long-short spread
+
+---
+
+## When Generating Code
+
+- Match existing project structure
+- Keep functions small and testable
+- Do not rewrite large files unnecessarily
+- Preserve existing APIs unless required
+- If unsure, choose the safest time-series implementation
+
+---
+
+## Optional Context
+
+For more details, refer to:
+`docs/copilot-project-context.md`
