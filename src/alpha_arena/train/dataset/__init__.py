@@ -9,7 +9,6 @@ from alpha_arena.train.dataset.builder import (
     DatasetSplitPaths,
     DatasetYearSplitConfig,
     SequenceSliceConfig,
-    build_dataset_split,
     build_datasets,
     build_processed_panel,
     fetch_trade_calendar,

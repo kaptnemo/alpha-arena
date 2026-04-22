@@ -268,6 +268,7 @@ poetry install
 
 ```bash
 poetry run arena_cli csi300-stocks 2017 2025 --storage-format parquet
+poetry run arena_cli index-stocks 2017 2025 --index-name csi500 --storage-format parquet
 poetry run arena_cli stock-daily sh.600000 20200101 20251231 --storage-format parquet
 ```
 

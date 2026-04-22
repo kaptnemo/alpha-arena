@@ -10,3 +10,4 @@ logs/
 
 .pytest_cache/
 .vscode/
+checkpoints/

@@ -42,6 +42,5 @@ if __name__ == "__main__":
     # Example usage
     new_file_path = DATASET_DATA_DIR / "csi300_2017_2025_seq60_step5_targets_5_10_20_label_y_ret_5_train_metadata.parquet"
     df = load_from_parquet(new_file_path)
-    import pdb; pdb.set_trace()
     print(df.head())
     print(df.tail())

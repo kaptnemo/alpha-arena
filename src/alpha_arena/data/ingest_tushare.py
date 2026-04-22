@@ -1,4 +1,5 @@
 import pandas as pd
+import re
 import time
 from pathlib import Path
 from collections import OrderedDict
@@ -13,6 +14,58 @@ from alpha_arena.data.helpers.tushare_helper import (
 from alpha_arena.utils import get_logger
 
 logger = get_logger(__name__)
+
+_INDEX_NAME_TO_CODE = {
+    "csi300": "399300.SZ",
+    "hs300": "399300.SZ",
+    "沪深300": "399300.SZ",
+    "csi500": "000905.SH",
+    "中证500": "000905.SH",
+    "csi1000": "000852.SH",
+    "中证1000": "000852.SH",
+    "sse50": "000016.SH",
+    "上证50": "000016.SH",
+}
+
+_INDEX_CODE_TO_CANONICAL_NAME = {
+    "399300.SZ": "csi300",
+    "000905.SH": "csi500",
+    "000852.SH": "csi1000",
+    "000016.SH": "sse50",
+}
+
+
+def _sanitize_index_name(value: str) -> str:
+    slug = re.sub(r"[^0-9a-zA-Z]+", "_", value.strip().lower()).strip("_")
+    if not slug:
+        raise ValueError(f"Invalid index name: {value!r}")
+    return slug
+
+
+def _resolve_index_config(index_name: str) -> tuple[str, str]:
+    normalized_name = index_name.strip()
+    if not normalized_name:
+        raise ValueError("Index name cannot be empty.")
+
+    index_code = _INDEX_NAME_TO_CODE.get(normalized_name.lower())
+    if index_code is None:
+        index_code = _INDEX_NAME_TO_CODE.get(normalized_name)
+
+    if index_code is None and re.fullmatch(r"\d{6}\.[A-Za-z]{2}", normalized_name):
+        index_code = normalized_name.upper()
+
+    if index_code is None:
+        supported_names = ", ".join(sorted({"csi300", "csi500", "csi1000", "sse50"}))
+        raise ValueError(
+            f"Unsupported index name: {index_name!r}. "
+            f"Use one of: {supported_names}, or pass a TuShare index code such as '000905.SH'."
+        )
+
+    resolved_index_name = _INDEX_CODE_TO_CANONICAL_NAME.get(
+        index_code,
+        _sanitize_index_name(normalized_name),
+    )
+    return resolved_index_name, index_code
 
 
 def _stock_daily(
@@ -49,28 +102,28 @@ def _get_adjustment_date_pairs(start_year: str, end_year: str):
     return get_adjustment_date_pairs
 
 
-def _get_csi300_stocks(
+def _get_index_stocks(
     helper: TuShareHelper,
+    index_code: str,
     date_pair: tuple[pd.Timestamp, pd.Timestamp],
     pre_last_pair_stocks: tuple[pd.Timestamp, list[str]] | None = None,
 
 ):
-    """Ingest csi300 stock list for a given date range.
+    """Ingest index stock list for a given date range.
     
     tushare api index_weight 的用法是按月查询的，所以我们生成每个月的月初月末日期范围对，来查询每个月的股票列表。
     然后取每个月的第一个交易日的股票列表作为该月的股票列表。
     这个方法会造成最多一个月的误差，因为指数调整的生效日可能不是月初，
     虽然不准确，但是不会造成信息泄露，随意这个误差在我们这个项目中是可以接受的。
     """
-    HS_300_CODE = '399300.SZ'
     start_date, end_date = date_pair
 
-    csi300_stocks_result = helper.index_weight(
-        index_code=HS_300_CODE,
+    index_stocks_result = helper.index_weight(
+        index_code=index_code,
         start_date=start_date.strftime('%Y%m%d'),
         end_date=end_date.strftime('%Y%m%d'),
     )
-    df = csi300_stocks_result.data
+    df = index_stocks_result.data
     df = df.sort_values('trade_date').reset_index(drop=True)
     result = OrderedDict()
     if not df.empty:
@@ -135,44 +188,67 @@ def _check_date_ranges(ranges):
     return is_valid, issues
 
 
-def _csi300_stocks_by_date_range(
+def _index_stocks_by_date_range(
     helper: TuShareHelper,
     start_year: str,
     end_year: str,
+    resolved_index_name: str,
+    index_code: str,
 ):
-    """Ingest csi300 stock list for a given date range."""
+    """Ingest index stock list for a given date range."""
     date_pairs = _get_adjustment_date_pairs(start_year, end_year)
-    logger.info("Generated adjustment date pairs", count=len(date_pairs))
-    csi300_stocks_by_date_pairs = OrderedDict()
+    logger.info(
+        "Generated adjustment date pairs",
+        count=len(date_pairs),
+        index_name=resolved_index_name,
+        index_code=index_code,
+    )
+    index_stocks_by_date_pairs = OrderedDict()
     pre_last_pair_stocks = None
     for date_pair in date_pairs:
-        stock_dicts, pre_last_pair_stocks = _get_csi300_stocks(helper, date_pair, pre_last_pair_stocks)
-        csi300_stocks_by_date_pairs.update(stock_dicts)
+        stock_dicts, pre_last_pair_stocks = _get_index_stocks(
+            helper,
+            index_code,
+            date_pair,
+            pre_last_pair_stocks,
+        )
+        index_stocks_by_date_pairs.update(stock_dicts)
     
-    check_date_ranges_result, issues = _check_date_ranges(list(csi300_stocks_by_date_pairs.keys()))
+    check_date_ranges_result, issues = _check_date_ranges(list(index_stocks_by_date_pairs.keys()))
     if not check_date_ranges_result:
-        logger.warning("Date range issues detected", issues=issues)
+        logger.warning(
+            "Date range issues detected",
+            issues=issues,
+            index_name=resolved_index_name,
+            index_code=index_code,
+        )
     else:
-        logger.info("Date ranges are continuous and non-overlapping")
+        logger.info(
+            "Date ranges are continuous and non-overlapping",
+            index_name=resolved_index_name,
+            index_code=index_code,
+        )
 
     stock_date_ranges = {}
-    for date_pair, stocks in csi300_stocks_by_date_pairs.items():
+    for date_pair, stocks in index_stocks_by_date_pairs.items():
         for stock in stocks:
             if stock not in stock_date_ranges:
                 stock_date_ranges[stock] = []
             stock_date_ranges[stock].append(date_pair)
             if stock == '000001.SZ':
                 logger.info(
-                    "Tracked sample stock in csi300",
+                    "Tracked sample stock in index",
                     stock=stock,
+                    index_name=resolved_index_name,
+                    index_code=index_code,
                     start_date=str(date_pair[0]),
                     end_date=str(date_pair[1]),
                 )
     return stock_date_ranges
 
 
-def _check_stock_in_csi300(stock_date_ranges, stock_code, date):
-    """Check if a given stock code is in the csi300 index on a given date."""
+def _check_stock_in_index(stock_date_ranges, stock_code, date):
+    """Check if a given stock code is in the target index on a given date."""
     if stock_code not in stock_date_ranges:
         return False
     d = pd.to_datetime(date)
@@ -182,25 +258,36 @@ def _check_stock_in_csi300(stock_date_ranges, stock_code, date):
     return False
 
 
-def _csi300_stocks(
+def _index_stocks(
     start_year: str,
     end_year: str,
     storage_format: str = "csv",
     file_path: Path | None = None,
+    index_name: str = "csi300",
 ):
     if storage_format not in ["csv", "parquet"]:
         raise ValueError("Unsupported storage format. Use 'csv' or 'parquet'.")
+    resolved_index_name, index_code = _resolve_index_config(index_name)
+    membership_column = f"in_{resolved_index_name}"
     if file_path is None:
         if not RAW_DATA_DIR.exists():
             RAW_DATA_DIR.mkdir(parents=True)
-        file_path = RAW_DATA_DIR / f"csi300_stocks_{start_year}_{end_year}.{storage_format}"
+        file_path = RAW_DATA_DIR / f"{resolved_index_name}_stocks_{start_year}_{end_year}.{storage_format}"
 
     all_fds = []
     with TuShareHelper() as helper:
-        stock_date_ranges = _csi300_stocks_by_date_range(helper, start_year, end_year)
+        stock_date_ranges = _index_stocks_by_date_range(
+            helper,
+            start_year,
+            end_year,
+            resolved_index_name,
+            index_code,
+        )
         all_stocks = list(stock_date_ranges.keys())
         logger.info(
-            "Collected csi300 universe",
+            "Collected index universe",
+            index_name=resolved_index_name,
+            index_code=index_code,
             start_year=start_year,
             end_year=end_year,
             total_unique_stocks=len(all_stocks),
@@ -214,9 +301,18 @@ def _csi300_stocks(
                 'trade_date': 'date',
                 'vol': 'volume',
             }, inplace=True)
-            df['in_csi300'] = df['date'].apply(lambda x: _check_stock_in_csi300(stock_date_ranges, stock_code, x))
+            df[membership_column] = df['date'].apply(
+                lambda x: _check_stock_in_index(stock_date_ranges, stock_code, x)
+            )
             all_fds.append(df)
-            logger.info("Processed stock daily data", index=i, stock_code=stock_code, records=len(df))
+            logger.info(
+                "Processed stock daily data",
+                index=i,
+                stock_code=stock_code,
+                index_name=resolved_index_name,
+                index_code=index_code,
+                records=len(df),
+            )
             time.sleep(0.5)  # 避免请求过快
 
     if not all_fds:

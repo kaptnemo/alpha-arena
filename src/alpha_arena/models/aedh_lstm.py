@@ -176,6 +176,13 @@ class AttentionEnhancedDualHeadLSTM(nn.Module):
             use_layernorm=True,
         )
 
+    def __call__(self,
+        x_seq: torch.Tensor,
+        x_cs: torch.Tensor,
+        x_cs_mask: torch.Tensor,
+    ) -> Dict[str, torch.Tensor]:
+        return self.forward(x_seq, x_cs, x_cs_mask)
+
     def forward(self,
         x_seq: torch.Tensor,
         x_cs: torch.Tensor,
@@ -267,19 +274,115 @@ class AttentionEnhancedDualHeadLSTM(nn.Module):
     def rank_ic_loss(
         pred_return: torch.Tensor,
         target_return: torch.Tensor,
+        mask: torch.Tensor | None = None,
         eps: float = 1e-8,
     ) -> torch.Tensor:
         """
-        Differentiable proxy of cross-sectional correlation.
-        Useful when one batch corresponds to multiple stocks on the same date.
+        Differentiable Pearson IC loss used as a proxy for RankIC.
+
+        Assumption:
+            One batch corresponds to one label_date cross-section.
         """
+        if mask is not None:
+            mask = mask.bool()
+            pred_return = pred_return[mask]
+            target_return = target_return[mask]
+
+        if pred_return.numel() < 2:
+            return pred_return.new_zeros(())
+
         x = pred_return - pred_return.mean()
         y = target_return - target_return.mean()
 
-        corr = (x * y).mean() / (x.std(unbiased=False) * y.std(unbiased=False) + eps)
+        x_var = (x * x).mean()
+        y_var = (y * y).mean()
+
+        if x_var.detach() < eps or y_var.detach() < eps:
+            return pred_return.new_zeros(())
+
+        corr = (x * y).mean() / torch.sqrt(x_var * y_var + eps)
+
         return -corr
 
+
     def compute_loss(
+        self,
+        outputs: Dict[str, torch.Tensor],
+        target_return: torch.Tensor,
+        loss_type: str = "gaussian_nll",
+        alpha_rank: float = 0.0,
+        alpha_mse: float = 0.0,   # ⭐ 新增
+        var_min: float = 1e-4,    # ⭐ 防止 variance collapse
+    ) -> Dict[str, torch.Tensor]:
+
+        pred_return = outputs["pred_return"]
+        pred_var = outputs["pred_var"]
+
+        # =====================
+        # 1. clamp variance（非常重要）作用：防止模型预测的方差过小，导致训练不稳定甚至 NaN。
+        # =====================
+        pred_var = torch.clamp(pred_var, min=var_min)
+
+        # =====================
+        # 2. MSE regularization（推荐加）
+        # =====================
+        mse_loss = F.mse_loss(pred_return, target_return)
+        # =====================
+        # 3. base loss
+        # =====================
+        if loss_type == "gaussian_nll":
+            nll_loss = F.gaussian_nll_loss(
+                input=pred_return,
+                target=target_return,
+                var=pred_var,
+                full=False,
+                reduction="mean"
+            )
+            base_loss = nll_loss
+
+        elif loss_type == "mse":
+            nll_loss = pred_return.new_zeros(())
+            base_loss = mse_loss
+
+        else:
+            raise ValueError(f"Unsupported loss_type: {loss_type}")
+
+        # =====================
+        # 4. rank loss
+        # =====================
+        if alpha_rank > 0:
+            rank_loss = self.rank_ic_loss(pred_return, target_return)
+        else:
+            rank_loss = torch.tensor(0.0, device=target_return.device)
+
+        # =====================
+        # 5. total loss
+        # =====================
+        total_loss = base_loss \
+                + alpha_mse * mse_loss \
+                + alpha_rank * rank_loss
+
+        # =====================
+        # 6. 额外监控（强烈推荐）
+        # =====================
+        pred_std = torch.sqrt(pred_var)
+
+        return {
+            "loss": total_loss,
+            "base_loss": base_loss.detach(),
+            "nll_loss": nll_loss.detach(),
+            "mse_loss": mse_loss.detach(),
+            "rank_loss": rank_loss.detach(),
+            "pred_var_mean": pred_var.mean().detach(),
+            "pred_var_min": pred_var.min().detach(),
+            "pred_var_max": pred_var.max().detach(),
+            "pred_std_mean": pred_std.mean().detach(),
+            "pred_return_mean": pred_return.mean().detach(),
+            "pred_return_std": pred_return.std(unbiased=False).detach(),
+        }
+    
+
+    def compute_loss_legacy(
         self,
         outputs: Dict[str, torch.Tensor],
         target_return: torch.Tensor,
@@ -313,4 +416,51 @@ class AttentionEnhancedDualHeadLSTM(nn.Module):
             "loss": total_loss,
             "base_loss": base_loss.detach(),
             "rank_loss": rank_loss.detach(),
+        }
+
+    def compute_loss_legacy2(
+        self,
+        outputs,
+        target_return,
+        target_risk=None,
+        loss_type="gaussian_nll",
+        alpha_rank=0.0,
+        alpha_risk=0.0,
+    ):
+        pred_return = outputs["pred_return"]
+        pred_var = outputs["pred_var"]
+        pred_vol = outputs["pred_vol"]
+
+        if loss_type == "gaussian_nll":
+            base_loss = F.gaussian_nll_loss(
+                input=pred_return,
+                target=target_return,
+                var=pred_var,
+                full=False,
+                reduction="mean",
+            )
+        elif loss_type == "mse":
+            base_loss = F.mse_loss(pred_return, target_return)
+        else:
+            raise ValueError(f"Unsupported loss_type: {loss_type}")
+
+        if alpha_rank > 0:
+            rank_loss = self.rank_ic_loss(pred_return, target_return)
+        else:
+            rank_loss = pred_return.new_zeros(())
+
+        if alpha_risk > 0:
+            if target_risk is None:
+                raise ValueError("target_risk is required when alpha_risk > 0")
+            risk_loss = F.mse_loss(pred_vol, target_risk)
+        else:
+            risk_loss = pred_return.new_zeros(())
+
+        total_loss = base_loss + alpha_rank * rank_loss + alpha_risk * risk_loss
+
+        return {
+            "loss": total_loss,
+            "base_loss": base_loss.detach(),
+            "rank_loss": rank_loss.detach(),
+            "risk_loss": risk_loss.detach(),
         }

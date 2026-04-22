@@ -160,6 +160,7 @@ def collate_fn(batch):
         "x_cs_mask": torch.as_tensor(np.stack([item["x_cs_mask"] for item in batch]), dtype=torch.float32),
         "y_return": torch.as_tensor([item["y_return"] for item in batch], dtype=torch.float32),
         "y_risk": torch.as_tensor([item["y_risk"] for item in batch], dtype=torch.float32),
+        "label_date": [item["metadata"]["label_date"] for item in batch],
     }
 
 
@@ -362,6 +363,7 @@ if __name__ == "__main__":
 
     for batch in random_dataloader:
         print(batch)
+        print(batch["x_seq"].shape, batch["x_cs"].shape, batch["x_cs_mask"].shape, batch["y_return"].shape, batch["y_risk"].shape)
         break
 
     for batch in grouped_dataloader:
