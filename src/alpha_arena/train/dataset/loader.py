@@ -1,6 +1,8 @@
 import json
 
+import math
 import torch
+import torch.distributed as dist
 from torch.utils.data import (
     Dataset,
     DataLoader,
@@ -209,10 +211,116 @@ class GroupedByDateBatchSampler(Sampler):
         return total
 
 
+def is_dist_available_and_initialized():
+    return dist.is_available() and dist.is_initialized()
+
+
+def get_world_size():
+    if dist.is_available() and dist.is_initialized():
+        return dist.get_world_size()
+    return 1
+
+def get_rank():
+    if dist.is_available() and dist.is_initialized():
+        return dist.get_rank()
+    return 0
+
+
+class DistributedGroupedByDateBatchSampler(Sampler[list[int]]):
+    def __init__(
+        self,
+        dataset,
+        batch_size: int,
+        shuffle: bool = True,
+        drop_last: bool = False,
+        world_size: int | None = None,
+        rank: int | None = None,
+        seed: int = 42,
+    ):
+        self.dataset = dataset
+        self.batch_size = batch_size
+        self.shuffle = shuffle
+        self.drop_last = drop_last
+        self.seed = seed
+        self.epoch = 0
+
+        if world_size is None:
+            world_size = get_world_size() if is_dist_available_and_initialized() else 1
+        if rank is None:
+            rank = get_rank() if is_dist_available_and_initialized() else 0
+
+        self.world_size = world_size
+        self.rank = rank
+        print(f"Initialized DistributedGroupedByDateBatchSampler with world_size={self.world_size}, rank={self.rank}")
+
+        self.date_to_indices = self._group_indices_by_date()
+
+    def _group_indices_by_date(self):
+        date_to_indices = {}
+        for idx in range(len(self.dataset)):
+            date = self.dataset.label_dates[idx]
+            if date not in date_to_indices:
+                date_to_indices[date] = []
+            date_to_indices[date].append(idx)
+        return date_to_indices
+
+    def set_epoch(self, epoch: int):
+        self.epoch = epoch
+
+    def _build_all_batches(self) -> list[list[int]]:
+        rng = np.random.RandomState(self.seed + self.epoch)
+
+        dates = list(self.date_to_indices.keys())
+        if self.shuffle:
+            rng.shuffle(dates)
+
+        all_batches = []
+
+        for date in dates:
+            indices = list(self.date_to_indices[date])
+
+            if self.shuffle:
+                rng.shuffle(indices)
+
+            for i in range(0, len(indices), self.batch_size):
+                batch = indices[i:i + self.batch_size]
+                if len(batch) < self.batch_size and self.drop_last:
+                    continue
+                all_batches.append(batch)
+
+        return all_batches
+
+    def __iter__(self):
+        all_batches = self._build_all_batches()
+
+        # 按 batch 维度切分给各 rank
+        if self.drop_last:
+            num_batches_per_rank = len(all_batches) // self.world_size
+            total_size = num_batches_per_rank * self.world_size
+            all_batches = all_batches[:total_size]
+        else:
+            num_batches_per_rank = math.ceil(len(all_batches) / self.world_size)
+            total_size = num_batches_per_rank * self.world_size
+
+            if len(all_batches) < total_size:
+                padding = total_size - len(all_batches)
+                all_batches.extend(all_batches[:padding])
+
+        rank_batches = all_batches[self.rank:total_size:self.world_size]
+        return iter(rank_batches)
+
+    def __len__(self):
+        all_batches = self._build_all_batches()
+        if self.drop_last:
+            return len(all_batches) // self.world_size
+        return math.ceil(len(all_batches) / self.world_size)
+
+
 if __name__ == "__main__":
+    dist.init_process_group(backend="nccl")
     dataset = SequenceDataset(
         dataset_name="csi300_2017_2025_seq60_step5_targets_5_10_20_label_y_ret_5",
-        split_name="test",
+        split_name="train",
     )
 
     for i in range(20):
@@ -225,12 +333,32 @@ if __name__ == "__main__":
         num_workers=4,
         collate_fn=collate_fn)
     
-    grouped_by_date_sampler = GroupedByDateBatchSampler(dataset, batch_size=64, shuffle=True)
+    grouped_by_date_sampler = GroupedByDateBatchSampler(
+        dataset,
+        batch_size=64,
+        shuffle=True
+    )
     grouped_dataloader = DataLoader(
         dataset,
         batch_sampler=grouped_by_date_sampler,
         num_workers=4,
-        collate_fn=collate_fn)
+        collate_fn=collate_fn
+    )
+
+    train_grouped_batch_sampler = DistributedGroupedByDateBatchSampler(
+        dataset,
+        batch_size=64,
+        shuffle=True,
+        drop_last=False,
+    )
+
+    train_grouped_loader = DataLoader(
+        dataset,
+        batch_sampler=train_grouped_batch_sampler,
+        num_workers=4,
+        pin_memory=True,
+        collate_fn=collate_fn,
+    )
 
     for batch in random_dataloader:
         print(batch)
