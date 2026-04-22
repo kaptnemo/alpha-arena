@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from dataclasses import dataclass
 from typing import Dict, Optional
 
@@ -13,6 +14,8 @@ class AEDH_LSTMConfig:
     head_hidden_dim: int = 64
     dropout: float = 0.2
     use_last_state: bool = True
+    cs_feature_dim: int = 0
+    cs_feature_mask: bool = False
 
 
 class TemporalAttention(nn.Module):
@@ -38,6 +41,10 @@ class TemporalAttention(nn.Module):
         )
 
     def forward(self, x: torch.Tensor):
+        """x: [B, T, H]
+
+        x 的每一步都是一个交易日的特征向量，没有插入全零的 padding 行，因此不需要 mask。
+        """
         scores = self.score(x).squeeze(-1)            # [B, T]
         attn_weights = torch.softmax(scores, dim=1)   # [B, T]
         context = torch.sum(x * attn_weights.unsqueeze(-1), dim=1)  # [B, H]
@@ -113,14 +120,14 @@ class AttentionEnhancedDualHeadLSTM(nn.Module):
         lstm_out_dim = self.hidden_dim
 
         self.input_proj = nn.Sequential(
-            nn.Linear(self.input_dim, self.input_dim),
-            nn.LayerNorm(self.input_dim),
+            nn.Linear(self.input_dim, self.hidden_dim),
+            nn.LayerNorm(self.hidden_dim),
             nn.ReLU(),
             nn.Dropout(self.config.dropout),
         )
 
         self.lstm = nn.LSTM(
-            input_size=self.input_dim,
+            input_size=self.hidden_dim,
             hidden_size=self.hidden_dim,
             num_layers=self.num_layers,
             batch_first=True,
@@ -134,9 +141,17 @@ class AttentionEnhancedDualHeadLSTM(nn.Module):
             dropout=self.config.dropout,
         )
 
-        fused_dim = lstm_out_dim
+        seq_dim = lstm_out_dim
         if self.use_last_state:
-            fused_dim += lstm_out_dim
+            seq_dim += lstm_out_dim
+
+        cs_raw_dim = 0
+        if self.config.cs_feature_dim > 0:
+            cs_raw_dim = self.config.cs_feature_dim
+            if self.config.cs_feature_mask:
+                cs_raw_dim += self.config.cs_feature_dim
+
+        fused_dim = seq_dim + cs_raw_dim
 
         self.fusion = nn.Sequential(
             nn.Linear(fused_dim, fused_dim),
@@ -161,7 +176,11 @@ class AttentionEnhancedDualHeadLSTM(nn.Module):
             use_layernorm=True,
         )
 
-    def forward(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
+    def forward(self,
+        x_seq: torch.Tensor,
+        x_cs: torch.Tensor,
+        x_cs_mask: torch.Tensor,
+    ) -> Dict[str, torch.Tensor]:
         """
         Args:
             x: [B, T, F]
@@ -176,25 +195,29 @@ class AttentionEnhancedDualHeadLSTM(nn.Module):
                 "features": [B, D],
             }
         """
-        x = self.input_proj(x)                 # [B, T, F]
+        x = self.input_proj(x_seq)                 # [B, T, F]
         lstm_out, _ = self.lstm(x)             # [B, T, H]
 
         context, attn_weights = self.attention(lstm_out)   # [B, H], [B, T]
 
+        parts = [context]
         if self.use_last_state:
-            last_state = lstm_out[:, -1, :]    # [B, H]
-            features = torch.cat([context, last_state], dim=-1)
-        else:
-            features = context
+            last_state = lstm_out[:, -1, :]   # [B, H]
+            parts.append(last_state)
+        parts.append(x_cs)
+        if self.config.cs_feature_mask and x_cs_mask is not None:
+            parts.append(x_cs_mask)
+
+        features = torch.cat(parts, dim=-1)
 
         features = self.fusion(features)
 
         pred_return = self.return_head(features).squeeze(-1)   # [B]
-        pred_logvar = self.risk_head(features).squeeze(-1)     # [B]
 
-        pred_logvar = torch.clamp(pred_logvar, min=-10.0, max=10.0)
-        pred_var = torch.exp(pred_logvar)
-        pred_vol = torch.sqrt(pred_var + 1e-8)
+        raw_var = self.risk_head(features).squeeze(-1)
+        pred_var = F.softplus(raw_var) + 1e-6
+        pred_logvar = torch.log(pred_var)
+        pred_vol = torch.sqrt(pred_var)
 
         return {
             "pred_return": pred_return,
@@ -264,10 +287,16 @@ class AttentionEnhancedDualHeadLSTM(nn.Module):
         alpha_rank: float = 0.0,
     ) -> Dict[str, torch.Tensor]:
         pred_return = outputs["pred_return"]
-        pred_logvar = outputs["pred_logvar"]
+        pred_var = outputs["pred_var"]
 
         if loss_type == "gaussian_nll":
-            base_loss = self.gaussian_nll_loss(pred_return, target_return, pred_logvar)
+            base_loss = F.gaussian_nll_loss(
+                input=pred_return,
+                target=target_return,
+                var=pred_var,
+                full=False,
+                reduction="mean"
+            )
         elif loss_type == "mse":
             base_loss = self.mse_loss(pred_return, target_return)
         else:
