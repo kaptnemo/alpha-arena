@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from dataclasses import dataclass
 from typing import Dict, Optional
+import pandas as pd
 
 
 @dataclass
@@ -227,12 +228,12 @@ class AttentionEnhancedDualHeadLSTM(nn.Module):
         pred_vol = torch.sqrt(pred_var)
 
         return {
-            "pred_return": pred_return,
-            "pred_logvar": pred_logvar,
-            "pred_var": pred_var,
-            "pred_vol": pred_vol,
-            "attn_weights": attn_weights,
-            "features": features,
+            "pred_return": pred_return,            # shape [B]
+            "pred_logvar": pred_logvar,            # 方便计算 NLL loss shape [B]
+            "pred_var": pred_var,                  # 方便监控预测的方差水平 shape [B]
+            "pred_vol": pred_vol,                  # 方便监控预测的标准差水平 shape [B]
+            "attn_weights": attn_weights,          # shape [B, T], for potential further analysis
+            "features": features,                  # shape [B, D], for potential further analysis
         }
 
     @staticmethod
@@ -380,87 +381,14 @@ class AttentionEnhancedDualHeadLSTM(nn.Module):
             "pred_return_mean": pred_return.mean().detach(),
             "pred_return_std": pred_return.std(unbiased=False).detach(),
         }
-    
 
-    def compute_loss_legacy(
+
+    def predict(
         self,
-        outputs: Dict[str, torch.Tensor],
-        target_return: torch.Tensor,
-        loss_type: str = "gaussian_nll",
-        alpha_rank: float = 0.0,
+        x_seq: torch.Tensor,
+        x_cs: torch.Tensor,
+        x_cs_mask: torch.Tensor,
     ) -> Dict[str, torch.Tensor]:
-        pred_return = outputs["pred_return"]
-        pred_var = outputs["pred_var"]
-
-        if loss_type == "gaussian_nll":
-            base_loss = F.gaussian_nll_loss(
-                input=pred_return,
-                target=target_return,
-                var=pred_var,
-                full=False,
-                reduction="mean"
-            )
-        elif loss_type == "mse":
-            base_loss = self.mse_loss(pred_return, target_return)
-        else:
-            raise ValueError(f"Unsupported loss_type: {loss_type}")
-
-        if alpha_rank > 0:
-            rank_loss = self.rank_ic_loss(pred_return, target_return)
-        else:
-            rank_loss = torch.tensor(0.0, device=target_return.device)
-
-        total_loss = base_loss + alpha_rank * rank_loss
-
-        return {
-            "loss": total_loss,
-            "base_loss": base_loss.detach(),
-            "rank_loss": rank_loss.detach(),
-        }
-
-    def compute_loss_legacy2(
-        self,
-        outputs,
-        target_return,
-        target_risk=None,
-        loss_type="gaussian_nll",
-        alpha_rank=0.0,
-        alpha_risk=0.0,
-    ):
-        pred_return = outputs["pred_return"]
-        pred_var = outputs["pred_var"]
-        pred_vol = outputs["pred_vol"]
-
-        if loss_type == "gaussian_nll":
-            base_loss = F.gaussian_nll_loss(
-                input=pred_return,
-                target=target_return,
-                var=pred_var,
-                full=False,
-                reduction="mean",
-            )
-        elif loss_type == "mse":
-            base_loss = F.mse_loss(pred_return, target_return)
-        else:
-            raise ValueError(f"Unsupported loss_type: {loss_type}")
-
-        if alpha_rank > 0:
-            rank_loss = self.rank_ic_loss(pred_return, target_return)
-        else:
-            rank_loss = pred_return.new_zeros(())
-
-        if alpha_risk > 0:
-            if target_risk is None:
-                raise ValueError("target_risk is required when alpha_risk > 0")
-            risk_loss = F.mse_loss(pred_vol, target_risk)
-        else:
-            risk_loss = pred_return.new_zeros(())
-
-        total_loss = base_loss + alpha_rank * rank_loss + alpha_risk * risk_loss
-
-        return {
-            "loss": total_loss,
-            "base_loss": base_loss.detach(),
-            "rank_loss": rank_loss.detach(),
-            "risk_loss": risk_loss.detach(),
-        }
+        self.eval()
+        with torch.no_grad():
+            return self.forward(x_seq, x_cs, x_cs_mask)

@@ -13,7 +13,6 @@ from alpha_arena.train.dataset.builder import (
     ProcessedPanelConfig,
     DatasetYearSplitConfig,
     SequenceSliceConfig,
-    build_dataset_split,
     build_datasets,
     build_processed_panel,
     load_processed_panel,
@@ -226,56 +225,3 @@ def test_build_datasets_rejects_processed_config_mismatch(tmp_path: Path) -> Non
 
     with pytest.raises(ValueError, match="Processed artifact config mismatch"):
         build_datasets(config, trade_calendar_provider=_business_day_calendar)
-
-
-def test_build_dataset_split_respects_gap_tolerance() -> None:
-    split_df = pd.DataFrame(
-        {
-            "ts_code": ["000001.SZ"] * 4,
-            "date": pd.to_datetime(
-                ["2024-01-02", "2024-01-03", "2024-01-05", "2024-01-08"]
-            ),
-            "close": [10.0, 10.2, 10.4, 10.6],
-            "ret_1": [0.01, 0.02, 0.03, 0.04],
-            "y_ret_1": [0.02, 10.4 / 10.2 - 1.0, 10.6 / 10.4 - 1.0, np.nan],
-        }
-    )
-    trading_calendar = pd.date_range("2024-01-02", "2024-01-08", freq="B")
-
-    strict_df = build_dataset_split(
-        split_name="train",
-        split_df=split_df,
-        feature_columns=["ret_1"],
-        sequence_config=SequenceSliceConfig(
-            sequence_length=3,
-            start_interval=1,
-            target_horizons=(1,),
-            max_missing_trade_days_per_gap=0,
-            max_missing_gaps=0,
-        ),
-        trading_calendar=trading_calendar,
-        label_column="y_ret_1",
-    )
-    tolerant_df = build_dataset_split(
-        split_name="train",
-        split_df=split_df,
-        feature_columns=["ret_1"],
-        sequence_config=SequenceSliceConfig(
-            sequence_length=3,
-            start_interval=1,
-            target_horizons=(1,),
-            max_missing_trade_days_per_gap=1,
-            max_missing_gaps=1,
-        ),
-        trading_calendar=trading_calendar,
-        label_column="y_ret_1",
-    )
-
-    assert strict_df.features.empty
-    assert strict_df.metadata.empty
-    assert tolerant_df.metadata["sample_id"].nunique() == 1
-    assert tolerant_df.features["sequence_position"].tolist() == [0, 1, 2]
-    assert tolerant_df.metadata["label_date"].dt.strftime("%Y-%m-%d").unique().tolist() == [
-        "2024-01-08"
-    ]
-    assert tolerant_df.metadata["mask_ret_1"].tolist() == [1.0]

@@ -144,6 +144,7 @@ class SequenceDataset(Dataset):
             "y_risk": np.float32(y_risk),
             "metadata": {
                 "label_date": metadata["label_date"],
+                "ts_code": metadata.get("ts_code", None),
             }
         }
 
@@ -161,6 +162,7 @@ def collate_fn(batch):
         "y_return": torch.as_tensor([item["y_return"] for item in batch], dtype=torch.float32),
         "y_risk": torch.as_tensor([item["y_risk"] for item in batch], dtype=torch.float32),
         "label_date": [item["metadata"]["label_date"] for item in batch],
+        "ts_code": [item["metadata"]["ts_code"] for item in batch],
     }
 
 
@@ -318,25 +320,25 @@ class DistributedGroupedByDateBatchSampler(Sampler[list[int]]):
 
 
 if __name__ == "__main__":
-    dist.init_process_group(backend="nccl")
+    # dist.init_process_group(backend="nccl")
     dataset = SequenceDataset(
         dataset_name="csi300_2017_2025_seq60_step5_targets_5_10_20_label_y_ret_5",
-        split_name="train",
+        split_name="test",
     )
 
     for i in range(20):
         assert dataset[i]['metadata']['label_date'] == dataset.label_dates[i], f"Metadata label_date {dataset[i]['metadata']['label_date']} does not match label_dates[{i}] = {dataset.label_dates[i]}"
 
-    random_dataloader = DataLoader(
-        dataset,
-        batch_size=64,
-        shuffle=True,
-        num_workers=4,
-        collate_fn=collate_fn)
+    # random_dataloader = DataLoader(
+    #     dataset,
+    #     batch_size=64,
+    #     shuffle=True,
+    #     num_workers=4,
+    #     collate_fn=collate_fn)
     
     grouped_by_date_sampler = GroupedByDateBatchSampler(
         dataset,
-        batch_size=64,
+        batch_size=1024,
         shuffle=True
     )
     grouped_dataloader = DataLoader(
@@ -346,26 +348,27 @@ if __name__ == "__main__":
         collate_fn=collate_fn
     )
 
-    train_grouped_batch_sampler = DistributedGroupedByDateBatchSampler(
-        dataset,
-        batch_size=64,
-        shuffle=True,
-        drop_last=False,
-    )
+    # train_grouped_batch_sampler = DistributedGroupedByDateBatchSampler(
+    #     dataset,
+    #     batch_size=64,
+    #     shuffle=True,
+    #     drop_last=False,
+    # )
 
-    train_grouped_loader = DataLoader(
-        dataset,
-        batch_sampler=train_grouped_batch_sampler,
-        num_workers=4,
-        pin_memory=True,
-        collate_fn=collate_fn,
-    )
-
-    for batch in random_dataloader:
-        print(batch)
-        print(batch["x_seq"].shape, batch["x_cs"].shape, batch["x_cs_mask"].shape, batch["y_return"].shape, batch["y_risk"].shape)
-        break
+    # train_grouped_loader = DataLoader(
+    #     dataset,
+    #     batch_sampler=train_grouped_batch_sampler,
+    #     num_workers=4,
+    #     pin_memory=True,
+    #     collate_fn=collate_fn,
+    # )
 
     for batch in grouped_dataloader:
-        print(batch)
-        break
+        batch_size = batch["x_seq"].shape[0]
+        label_date = batch["label_date"][0]
+        print(f"Batch size: {batch_size}, Label date: {label_date}")
+        assert all(date == label_date for date in batch["label_date"]), "All label_dates in the batch should be the same"
+
+    # for batch in grouped_dataloader:
+    #     print(batch)
+    #     break

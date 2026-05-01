@@ -194,8 +194,8 @@ def main():
     train_random_loader = dataloaders["train_random_loader"]
     valid_loader = dataloaders["valid_loader"]
 
-    num_epochs = 50
-    mid_epochs = num_epochs // 2
+    num_epochs = 80
+    mid_epochs = 20 
     warmup_epochs = 10
 
     # 训练模型

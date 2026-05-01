@@ -140,7 +140,7 @@ def save_model(
     torch.save(ckpt, save_path)
 
 
-def load_model(path):
+def load_model_from_pretrained(path: str | Path) -> tuple[nn.Module, dict[str, Any]]:
     import torch
 
     ckpt = torch.load(path, map_location="cpu")

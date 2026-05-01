@@ -35,6 +35,8 @@ from alpha_arena.utils import get_logger
 logger = get_logger(__name__)
 
 _RAW_COLS = frozenset({"ts_code", "date", "open", "high", "low", "close", "volume"})
+_VALID_SPLIT_ON = frozenset({"end_date", "label_date"})
+_VALID_UNIVERSE_FILTER_MODES = frozenset({"full_window", "anchor_date", "label_date"})
 
 # Tracks which steps have already been logged in this process.
 # In multiprocessing, each worker gets its own copy, so each process logs only once.
@@ -181,6 +183,11 @@ class DatasetBuilderConfig:
     exchange: str = "SSE"
     dataset_name: str = "sequence_dataset"
     dataset_dir: Path = field(default_factory=lambda: DATASET_DATA_DIR)
+    split_on: str = "label_date"
+    universe_filter_mode: str = "anchor_date"
+    train_start_interval: int | None = None
+    evaluate_start_interval: int | None = None
+    test_start_interval: int | None = None
 
     def __post_init__(self) -> None:
         self.dataset_dir = Path(self.dataset_dir)
@@ -203,19 +210,44 @@ class DatasetBuilderConfig:
             raise ValueError(
                 "label_column horizon must be present in processed.target_horizons."
             )
+        if self.split_on not in _VALID_SPLIT_ON:
+            raise ValueError(
+                f"split_on must be one of {sorted(_VALID_SPLIT_ON)}, got {self.split_on!r}."
+            )
+        if self.universe_filter_mode not in _VALID_UNIVERSE_FILTER_MODES:
+            raise ValueError(
+                "universe_filter_mode must be one of "
+                f"{sorted(_VALID_UNIVERSE_FILTER_MODES)}, got {self.universe_filter_mode!r}."
+            )
+        invalid_intervals = {
+            name: value
+            for name, value in self.start_interval_by_split().items()
+            if value <= 0
+        }
+        if invalid_intervals:
+            raise ValueError(f"All split start intervals must be positive, got {invalid_intervals}.")
+
+    def start_interval_by_split(self) -> dict[str, int]:
+        return {
+            "train": self.sequence.start_interval if self.train_start_interval is None else int(self.train_start_interval),
+            "evaluate": self.sequence.start_interval if self.evaluate_start_interval is None else int(self.evaluate_start_interval),
+            "test": self.sequence.start_interval if self.test_start_interval is None else int(self.test_start_interval),
+        }
 
 
 @dataclass(frozen=True)
 class DatasetSplitArgs:
     symbol_df: pd.DataFrame
     sequence_config: SequenceSliceConfig
-    split_config: DatasetYearSplitConfig
     ts_code: str
-    calendar_positions: dict[pd.Timestamp, int]
     feature_specs: Sequence[FeatureSpec | dict]
+    calendar_positions: dict[pd.Timestamp, int]
     trading_calendar: pd.DatetimeIndex
+    sample_anchor_calendar: pd.DatetimeIndex
+    anchor_split_map: dict[pd.Timestamp, str]
     target_columns: Sequence[str]
     label_column: str
+    universe_filter_mode: str
 
 
 @dataclass(frozen=True)
@@ -229,6 +261,7 @@ class DatasetStreamingWriteArgs:
 @dataclass(frozen=True)
 class DatasetMetadataArgs:
     symbol_tasks: tuple[DatasetSplitArgs, ...]
+    split_names: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -297,11 +330,11 @@ def merge_feature_stats(stats_list: list[FeatureStats], n_features: int) -> Feat
     )
 
 
-def resolve_split_by_end_date(
-    end_date: pd.Timestamp,
+def resolve_split_by_date(
+    sample_date: pd.Timestamp,
     split_config: dict[str, tuple[int, ...]],
 ) -> str | None:
-    year = pd.Timestamp(end_date).year
+    year = pd.Timestamp(sample_date).year
     for split_name, years in split_config.items():
         if year in years:
             return split_name
@@ -314,9 +347,9 @@ def iter_symbol_samples(args: DatasetSplitArgs) -> Iterator[tuple[str, dict]]:
     ts_code = args.ts_code
     calendar_positions = args.calendar_positions
     trading_calendar = args.trading_calendar
+    sample_anchor_calendar = args.sample_anchor_calendar
     target_columns = args.target_columns
     label_column = args.label_column
-    split_config = args.split_config.as_dict()
     if len(symbol_df) < sequence_config.sequence_length:
         # Not enough data to form a single sequence; skip this symbol.
         return
@@ -325,13 +358,18 @@ def iter_symbol_samples(args: DatasetSplitArgs) -> Iterator[tuple[str, dict]]:
         for idx, date in enumerate(symbol_df["date"])
     }
     cross_sectional_columns = select_cross_sectional_feature_columns(args.feature_specs)
-    max_start = len(symbol_df) - sequence_config.sequence_length + 1
-    for start_idx in range(0, max_start, sequence_config.start_interval):
-        end_idx = start_idx + sequence_config.sequence_length - 1
+
+    for anchor_date in sample_anchor_calendar:
+        end_idx = date_to_row_index.get(anchor_date, None)
+        if end_idx is None:
+            continue
+        start_idx = end_idx - sequence_config.sequence_length + 1
+        if start_idx < 0:
+            continue
         window = symbol_df.iloc[start_idx : end_idx + 1].copy()
 
-        if not _is_window_trade_continuous(
-            window["date"],
+        if not _check_trade_window(
+            window,
             calendar_positions,
             sequence_config,
         ):
@@ -347,12 +385,24 @@ def iter_symbol_samples(args: DatasetSplitArgs) -> Iterator[tuple[str, dict]]:
             cross_sectional_columns=cross_sectional_columns,
         )
         if target_info is None:
+            logger.warning(
+                f"Failed to compute targets for ts_code={ts_code} at end_date={anchor_date.date()}. Skipping this sample."
+            )
             continue
 
         label_date = target_info["label_dates"].get(label_column, pd.NaT)
         target_value = target_info["targets"].get(label_column, np.nan)
         target_mask = target_info["target_mask"].get(label_column, 0.0)
         if pd.isna(label_date) or pd.isna(target_value) or target_mask <= 0.0:
+            continue
+        label_row_index = date_to_row_index.get(pd.Timestamp(label_date).normalize())
+        if not _passes_universe_filter(
+            symbol_df=symbol_df,
+            window=window,
+            end_idx=end_idx,
+            label_row_index=label_row_index,
+            universe_filter_mode=args.universe_filter_mode,
+        ):
             continue
 
         start_date = window.iloc[0]["date"]
@@ -369,6 +419,7 @@ def iter_symbol_samples(args: DatasetSplitArgs) -> Iterator[tuple[str, dict]]:
             "end_idx": end_idx,
             "sequence_start_date": start_date,
             "sequence_end_date": end_date,
+            "anchor_date": end_date,
             "label_date": label_date,
         }
         for target_col in target_columns:
@@ -381,9 +432,7 @@ def iter_symbol_samples(args: DatasetSplitArgs) -> Iterator[tuple[str, dict]]:
             metadata_row[cross_col] = target_info["cross_sectional"].get(cross_col, np.nan)
             metadata_row[f"{cross_col}_mask"] = target_info["cross_sectional_mask"].get(cross_col, 0.0)
 
-        split_name = resolve_split_by_end_date(
-            end_date,
-            split_config)
+        split_name = args.anchor_split_map.get(pd.Timestamp(anchor_date).normalize())
         yield split_name, metadata_row
 
 
@@ -448,11 +497,9 @@ def _worker_get_dataset_metadata_task(
     if not symbol_tasks:
         return {}, {}
 
-    split_config = symbol_tasks[0].split_config.as_dict()
+    sample_counts = {split_name: 0 for split_name in args.split_names}
 
-    sample_counts = {split_name: 0 for split_name in split_config}
-
-    metadata_rows: dict[str, list[dict]] = {split_name: [] for split_name in split_config}
+    metadata_rows: dict[str, list[dict]] = {split_name: [] for split_name in args.split_names}
     for dataset_split_args in symbol_tasks:
         for split_name, metadata_row in iter_symbol_samples(dataset_split_args):
             if split_name is None or metadata_row is None:
@@ -461,7 +508,7 @@ def _worker_get_dataset_metadata_task(
             sample_counts[split_name] += 1
 
     split_dfs = {}
-    for split_name in split_config:
+    for split_name in args.split_names:
         split_dfs[split_name] = pd.DataFrame(metadata_rows[split_name])
 
     return split_dfs, sample_counts
@@ -475,6 +522,9 @@ def build_and_save_dataset(
     target_columns: Sequence[str],
     label_column: str,
     split_config: DatasetYearSplitConfig,
+    split_on: str,
+    universe_filter_mode: str,
+    start_interval_by_split: dict[str, int],
     dataset_dir: Path,
     dataset_name: str,
     multiprocess: bool = True,
@@ -490,7 +540,15 @@ def build_and_save_dataset(
     calendar_positions = {
         pd.Timestamp(date).normalize(): idx for idx, date in enumerate(trading_calendar)
     }
-
+    _, anchor_split_map = generate_split_anchor_calendars(
+        trading_calendar=trading_calendar,
+        sequence_config=sequence_config,
+        split_config=split_config,
+        label_column=label_column,
+        split_on=split_on,
+        start_interval_by_split=start_interval_by_split,
+    )
+    sample_anchor_calendar = pd.DatetimeIndex(sorted(anchor_split_map))
     groups = [(ts_code, group) for ts_code, group in source_df.groupby("ts_code", sort=False)]
     max_workers = num_workers or max(1, (os.cpu_count() or 1) - 1) if multiprocess else 1
     worker_count = max(1, min(max_workers, len(groups)))
@@ -499,13 +557,15 @@ def build_and_save_dataset(
         DatasetSplitArgs(
             symbol_df=group,
             sequence_config=sequence_config,
-            split_config=split_config,
             ts_code=ts_code,
-            calendar_positions=calendar_positions,
             feature_specs=feature_specs,
+            calendar_positions=calendar_positions,
+            sample_anchor_calendar=sample_anchor_calendar,
+            anchor_split_map=anchor_split_map,
             trading_calendar=trading_calendar,
             target_columns=target_columns,
             label_column=label_column,
+            universe_filter_mode=universe_filter_mode,
         )
         for ts_code, group in groups
     ]
@@ -514,6 +574,7 @@ def build_and_save_dataset(
     batch_tasks = [
         DatasetMetadataArgs(
             symbol_tasks=tuple(split_arg_list[i:i + batch_size]),
+            split_names=split_names,
         )
         for _, i in enumerate(range(0, len(split_arg_list), batch_size))
     ]
@@ -720,6 +781,7 @@ def _empty_metadata_frame(target_columns: Sequence[str]) -> pd.DataFrame:
             "end_idx",
             "sequence_start_date",
             "sequence_end_date",
+            "anchor_date",
             "label_date",
             *target_columns,
             *(_target_mask_column(target_column) for target_column in target_columns),
@@ -727,12 +789,13 @@ def _empty_metadata_frame(target_columns: Sequence[str]) -> pd.DataFrame:
     )
 
 
-def _is_window_trade_continuous(
-    dates: pd.Series,
+def _check_trade_window(
+    trade_df: pd.DataFrame,
     calendar_positions: dict[pd.Timestamp, int],
     sequence_config: SequenceSliceConfig,
 ) -> bool:
     gap_count = 0
+    dates = trade_df["date"].tolist()
     normalized_dates = [pd.Timestamp(date).normalize() for date in dates]
 
     for prev_date, curr_date in zip(normalized_dates[:-1], normalized_dates[1:]):
@@ -749,6 +812,37 @@ def _is_window_trade_continuous(
                 return False
 
     return True
+
+
+def _is_in_universe(value: Any) -> bool:
+    if pd.isna(value):
+        return False
+    return bool(value)
+
+
+def _passes_universe_filter(
+    symbol_df: pd.DataFrame,
+    window: pd.DataFrame,
+    end_idx: int,
+    label_row_index: int | None,
+    universe_filter_mode: str,
+) -> bool:
+    if universe_filter_mode == "full_window":
+        in_universe = window.get("in_csi300", pd.Series(True, index=window.index))
+        return bool(in_universe.fillna(False).astype(bool).all())
+
+    if universe_filter_mode == "anchor_date":
+        return _is_in_universe(symbol_df.iloc[end_idx].get("in_csi300", True))
+
+    if universe_filter_mode == "label_date":
+        if label_row_index is None:
+            return False
+        return _is_in_universe(symbol_df.iloc[label_row_index].get("in_csi300", True))
+
+    raise ValueError(
+        "universe_filter_mode must be one of "
+        f"{sorted(_VALID_UNIVERSE_FILTER_MODES)}, got {universe_filter_mode!r}."
+    )
 
 
 def _compute_targets_for_window(
@@ -988,6 +1082,61 @@ def build_and_save_features(
     return features_path
 
 
+def generate_sample_anchor_calendar(
+    trading_calendar: pd.DatetimeIndex,
+    sequence_length: int,
+    start_interval: int,
+    label_horizon: int,
+) -> pd.DatetimeIndex:
+    if start_interval <= 0:
+        raise ValueError("start_interval must be positive.")
+    max_anchor_position = len(trading_calendar) - label_horizon
+    if max_anchor_position <= sequence_length - 1:
+        return pd.DatetimeIndex([], dtype="datetime64[ns]")
+    return trading_calendar[sequence_length - 1:max_anchor_position:start_interval]
+
+
+def generate_split_anchor_calendars(
+    trading_calendar: pd.DatetimeIndex,
+    sequence_config: SequenceSliceConfig,
+    split_config: DatasetYearSplitConfig,
+    label_column: str,
+    split_on: str,
+    start_interval_by_split: dict[str, int],
+) -> tuple[dict[str, pd.DatetimeIndex], dict[pd.Timestamp, str]]:
+    label_horizon = _target_column_horizon(label_column)
+    if label_horizon is None:
+        raise ValueError(f"Unsupported label_column: {label_column!r}")
+
+    split_anchor_calendars: dict[str, pd.DatetimeIndex] = {}
+    anchor_split_map: dict[pd.Timestamp, str] = {}
+
+    for split_name, years in split_config.as_dict().items():
+        anchor_calendar = generate_sample_anchor_calendar(
+            trading_calendar=trading_calendar,
+            sequence_length=sequence_config.sequence_length,
+            start_interval=start_interval_by_split[split_name],
+            label_horizon=label_horizon,
+        )
+        if len(anchor_calendar) == 0:
+            split_anchor_calendars[split_name] = anchor_calendar
+            continue
+
+        anchor_positions = trading_calendar.get_indexer(anchor_calendar)
+        if split_on == "label_date":
+            split_dates = trading_calendar[anchor_positions + label_horizon]
+        else:
+            split_dates = anchor_calendar
+
+        year_mask = pd.Index(split_dates.year).isin(years)
+        filtered_anchor_calendar = anchor_calendar[year_mask]
+        split_anchor_calendars[split_name] = filtered_anchor_calendar
+        for anchor_date in filtered_anchor_calendar:
+            anchor_split_map[pd.Timestamp(anchor_date).normalize()] = split_name
+
+    return split_anchor_calendars, anchor_split_map
+    
+
 def build_datasets(
     config: DatasetBuilderConfig,
     trade_calendar_provider: TradeCalendarProvider | None = None,
@@ -1001,6 +1150,9 @@ def build_datasets(
         sequence_length=config.sequence.sequence_length,
         target_horizons=config.sequence.target_horizons,
         label_column=config.label_column,
+        split_on=config.split_on,
+        universe_filter_mode=config.universe_filter_mode,
+        start_interval_by_split=config.start_interval_by_split(),
     )
     processed_df, persisted_config = load_processed_panel(config.processed)
     _log_columns_once("load_processed_panel", None, list(processed_df.columns))
@@ -1059,7 +1211,7 @@ def build_datasets(
 
     # metadata 生成仍然必须基于保留 target 列的 source_df，而不是 features_df
     cross_sectional_columns = select_cross_sectional_feature_columns(feature_specs)
-    metadata_columns = ["ts_code", "date", *target_columns, *cross_sectional_columns]
+    metadata_columns = ["ts_code", "date", "in_csi300", *target_columns, *cross_sectional_columns]
     metadata_columns = list(dict.fromkeys(metadata_columns))
 
     metadata_source_df = processed_df.loc[:, metadata_columns].copy()
@@ -1074,6 +1226,9 @@ def build_datasets(
         target_columns=target_columns,
         label_column=config.label_column,
         split_config=config.splits,
+        split_on=config.split_on,
+        universe_filter_mode=config.universe_filter_mode,
+        start_interval_by_split=config.start_interval_by_split(),
         dataset_dir=config.dataset_dir,
         dataset_name=config.dataset_name,
         multiprocess=multiprocess,
@@ -1103,6 +1258,9 @@ def build_datasets(
             "target_columns": result.target_columns,
             "cross_sectional_columns": result.cross_sectional_columns,
             "sample_counts": result.sample_counts,
+            "split_on": config.split_on,
+            "universe_filter_mode": config.universe_filter_mode,
+            "start_interval_by_split": config.start_interval_by_split(),
         }, fh, ensure_ascii=True, indent=2, sort_keys=True)
     logger.info(
         "Dataset build completed",
@@ -1158,6 +1316,11 @@ if __name__ == "__main__":
         label_column="y_ret_5",
         exchange="SSE",
         dataset_name="csi300_2017_2025_seq60_step5_targets_5_10_20_label_y_ret_5",
+        split_on="label_date",
+        universe_filter_mode="anchor_date",
+        train_start_interval=5,
+        evaluate_start_interval=1,
+        test_start_interval=1,
     )
 
     rebuild_processed_panel = False
@@ -1174,4 +1337,3 @@ if __name__ == "__main__":
 
     print("dataset build done")
     print(result)
-

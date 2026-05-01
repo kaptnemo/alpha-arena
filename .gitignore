@@ -11,3 +11,6 @@ logs/
 .pytest_cache/
 .vscode/
 checkpoints/
+
+*.csv
+*.csv#
