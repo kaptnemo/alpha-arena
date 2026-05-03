@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-import time
 import copy
 import json
 from pathlib import Path
@@ -14,12 +13,14 @@ from scipy.stats import spearmanr, pearsonr
 from dataclasses import asdict
 import torch
 import torch.distributed as dist
+from torch.distributed import ReduceOp
 from torch import nn
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
 from alpha_arena.models.aedh_lstm import AttentionEnhancedDualHeadLSTM, AEDH_LSTMConfig
+import numpy.typing as npt
 
-    
+
 def setup_ddp():
     dist.init_process_group(backend="nccl")
     local_rank = int(os.environ["LOCAL_RANK"])
@@ -62,7 +63,9 @@ def ddp_broadcast_object(obj: Any, src: int = 0) -> Any:
     return obj_list[0]
 
 
-def ddp_reduce_op(value: float, device: torch.device, op: dist.ReduceOp = dist.ReduceOp.SUM) -> float:
+def ddp_reduce_op(
+    value: float, device: torch.device, op: ReduceOp.RedOpType = ReduceOp.SUM
+) -> float:
     if not is_dist_available_and_initialized():
         return value
     t = torch.tensor([value], dtype=torch.float64, device=device)
@@ -107,14 +110,11 @@ def save_checkpoint(
     ckpt = {
         "epoch": epoch,
         "model_state_dict": unwrap_model(model).state_dict(),
-
         "model_config": model_config,
         # "feature_config": feature_config,
-
         "optimizer_state_dict": optimizer.state_dict(),
         "scheduler_state_dict": scheduler.state_dict() if scheduler else None,
         "scaler_state_dict": scaler.state_dict() if scaler else None,
-
         "best_metric": best_metric,
         "history": history,
     }
@@ -146,11 +146,11 @@ def load_model_from_pretrained(path: str | Path) -> tuple[nn.Module, dict[str, A
     ckpt = torch.load(path, map_location="cpu")
 
     model_config = ckpt["model_config"]
-    #feature_config = ckpt["feature_config"]
+    # feature_config = ckpt["feature_config"]
     config = AEDH_LSTMConfig(**model_config)
     model = AttentionEnhancedDualHeadLSTM(config)
     model.load_state_dict(ckpt["model_state_dict"])
-    return model, model_config  
+    return model, model_config
 
 
 def load_checkpoint(
@@ -220,15 +220,17 @@ def compute_cross_sectional_metrics(
     top_frac: float = 0.2,
     min_group_size: int = 20,
 ) -> dict[str, float]:
-    df = pd.DataFrame({
-        "pred": np.asarray(pred_return),
-        "target": np.asarray(target_return),
-        "label_date": np.asarray(label_date),
-    })
+    df = pd.DataFrame(
+        {
+            "pred": np.asarray(pred_return),
+            "target": np.asarray(target_return),
+            "label_date": np.asarray(label_date),
+        }
+    )
 
-    rank_ics = []
-    ics = []
-    spreads = []
+    rank_ics: list[float] = []
+    ics: list[float] = []
+    spreads: list[float] = []
 
     for _, g in df.groupby("label_date"):
         if len(g) < min_group_size:
@@ -255,9 +257,9 @@ def compute_cross_sectional_metrics(
         top_ret = g_sorted.tail(k)["target"].mean()
         spreads.append(top_ret - bottom_ret)
 
-    rank_ics = np.asarray(rank_ics, dtype=np.float64)
-    ics = np.asarray(ics, dtype=np.float64)
-    spreads = np.asarray(spreads, dtype=np.float64)
+    np_rank_ics: npt.NDArray[np.float64] = np.asarray(rank_ics, dtype=np.float64)
+    np_ics: npt.NDArray[np.float64] = np.asarray(ics, dtype=np.float64)
+    np_spreads: npt.NDArray[np.float64] = np.asarray(spreads, dtype=np.float64)
 
     if len(rank_ics) == 0:
         return {
@@ -270,13 +272,16 @@ def compute_cross_sectional_metrics(
         }
 
     return {
-        "rank_ic_mean": float(np.mean(rank_ics)),
-        "rank_ic_std": float(np.std(rank_ics)),
-        "rank_ic_ir": float(np.mean(rank_ics) / (np.std(rank_ics) + 1e-8)),
-        "rank_ic_pos_ratio": float(np.mean(rank_ics > 0)),
-        "ic_mean": float(np.mean(ics)) if len(ics) > 0 else float("nan"),
-        "top_bottom_spread": float(np.mean(spreads)) if len(spreads) > 0 else float("nan"),
+        "rank_ic_mean": float(np.mean(np_rank_ics)),
+        "rank_ic_std": float(np.std(np_rank_ics)),
+        "rank_ic_ir": float(np.mean(np_rank_ics) / (np.std(np_rank_ics) + 1e-8)),
+        "rank_ic_pos_ratio": float(np.mean(np_rank_ics > 0)),
+        "ic_mean": float(np.mean(np_ics)) if len(np_ics) > 0 else float("nan"),
+        "top_bottom_spread": float(np.mean(np_spreads))
+        if len(np_spreads) > 0
+        else float("nan"),
     }
+
 
 mean_keys = {
     "loss",
@@ -301,6 +306,7 @@ max_keys = {
     "pred_var_max",
 }
 
+
 # =========================
 # one epoch: AMP + DDP
 # =========================
@@ -309,6 +315,7 @@ def run_one_epoch(
     model: nn.Module,
     loader: DataLoader,
     device: torch.device,
+    is_train: bool,
     optimizer: torch.optim.Optimizer | None,
     loss_type: str,
     alpha_rank: float,
@@ -328,24 +335,29 @@ def run_one_epoch(
     DDP:
       - 所有 scalar metric 按 sum(loss * batch_size) / sum(batch_size) 做全局聚合
     """
-    is_train = optimizer is not None
+    if is_train and optimizer is None:
+        raise ValueError("optimizer must be provided when is_train=True")
     model.train(is_train)
 
     local_sum: dict[str, float] = {}
-    local_batch_sum = {}
-    local_min = {}
-    local_max = {}
-    local_num_samples = 0
-    local_num_batches = 0
+    local_batch_sum: dict[str, float] = {}
+    local_min: dict[str, float] = {}
+    local_max: dict[str, float] = {}
+    local_num_samples: int = 0
+    local_num_batches: int = 0
 
-    all_pred_return = []
-    all_target_return = []
-    all_label_date = []
+    all_pred_return: list[torch.Tensor] = []
+    all_target_return: list[torch.Tensor] = []
+    all_label_date: list = []
 
     grad_context = torch.enable_grad() if is_train else torch.no_grad()
 
     # 只让 rank0 显示 tqdm
-    is_main = (not dist.is_available()) or (not dist.is_initialized()) or (dist.get_rank() == 0)
+    is_main = (
+        (not dist.is_available())
+        or (not dist.is_initialized())
+        or (dist.get_rank() == 0)
+    )
 
     if is_main:
         pbar = tqdm(loader, desc="train" if is_train else "valid", leave=False)
@@ -355,9 +367,6 @@ def run_one_epoch(
     with grad_context:
         for step, batch in enumerate(loader):
             batch = move_batch_to_device(batch, device)
-
-            if is_train:
-                optimizer.zero_grad(set_to_none=True)
 
             autocast_enabled = use_amp and (device.type == "cuda")
             with torch.amp.autocast(
@@ -373,7 +382,9 @@ def run_one_epoch(
                     x_cs_mask=batch["x_cs_mask"],
                 )
                 if not is_train:
-                    all_pred_return.append(outputs["pred_return"].detach().float().cpu())
+                    all_pred_return.append(
+                        outputs["pred_return"].detach().float().cpu()
+                    )
                     all_target_return.append(batch["y_return"].detach().float().cpu())
                     all_label_date.extend(batch["label_date"])
                 # torch.cuda.synchronize(device)
@@ -390,14 +401,17 @@ def run_one_epoch(
                 # torch.cuda.synchronize(device)
                 # t_opt2 = time.time()
             if is_train:
+                assert optimizer is not None
+                optimizer.zero_grad(set_to_none=True)
                 if scaler is not None and autocast_enabled:
-
                     scaler.scale(loss).backward()
                     # torch.cuda.synchronize(device)
                     # t_opt3 = time.time()
                     if max_grad_norm is not None and max_grad_norm > 0:
                         scaler.unscale_(optimizer)
-                        torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+                        torch.nn.utils.clip_grad_norm_(
+                            model.parameters(), max_grad_norm
+                        )
 
                     # torch.cuda.synchronize(device)
                     # t_opt4 = time.time()
@@ -410,18 +424,21 @@ def run_one_epoch(
                 else:
                     loss.backward()
                     if max_grad_norm is not None and max_grad_norm > 0:
-                        torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+                        torch.nn.utils.clip_grad_norm_(
+                            model.parameters(), max_grad_norm
+                        )
 
                     optimizer.step()
 
             if is_main:
-                pbar.set_postfix({
-                    "loss": f"{loss.item():.4f}",
-                    # "load": f"{(t1 - t0)*1000:.1f}ms",
-                    # "step": f"{(t6 - t1)*1000:.1f}ms",
-                })
+                pbar.set_postfix(
+                    {
+                        "loss": f"{loss.item():.4f}",
+                        # "load": f"{(t1 - t0)*1000:.1f}ms",
+                        # "step": f"{(t6 - t1)*1000:.1f}ms",
+                    }
+                )
                 pbar.update(1)
-
 
             batch_size = int(batch["x_seq"].shape[0])
             scalar_losses = detach_loss_dict(loss_dict)
@@ -441,23 +458,27 @@ def run_one_epoch(
 
     metrics = {}
 
-    global_num_samples = ddp_reduce_op(float(local_num_samples), device=device, op=dist.ReduceOp.SUM)
-    global_num_batches = ddp_reduce_op(float(local_num_batches), device=device, op=dist.ReduceOp.SUM)
+    global_num_samples = ddp_reduce_op(
+        float(local_num_samples), device=device, op=ReduceOp.SUM
+    )
+    global_num_batches = ddp_reduce_op(
+        float(local_num_batches), device=device, op=ReduceOp.SUM
+    )
 
     for k, v in local_sum.items():
-        global_sum = ddp_reduce_op(float(v), device=device, op=dist.ReduceOp.SUM)
+        global_sum = ddp_reduce_op(float(v), device=device, op=ReduceOp.SUM)
         metrics[k] = global_sum / max(global_num_samples, 1.0)
 
     for k, v in local_batch_sum.items():
-        global_sum = ddp_reduce_op(float(v), device=device, op=dist.ReduceOp.SUM)
+        global_sum = ddp_reduce_op(float(v), device=device, op=ReduceOp.SUM)
         metrics[k] = global_sum / max(global_num_batches, 1.0)
 
     for k, v in local_min.items():
-        global_min = ddp_reduce_op(float(v), device=device, op=dist.ReduceOp.MIN)
+        global_min = ddp_reduce_op(float(v), device=device, op=ReduceOp.MIN)
         metrics[k] = global_min
-    
+
     for k, v in local_max.items():
-        global_max = ddp_reduce_op(float(v), device=device, op=dist.ReduceOp.MAX)
+        global_max = ddp_reduce_op(float(v), device=device, op=ReduceOp.MAX)
         metrics[k] = global_max
 
     if not is_train and all_pred_return:
@@ -480,6 +501,7 @@ def run_one_epoch(
 def set_optimizer_lr(optimizer, lr: float):
     for group in optimizer.param_groups:
         group["lr"] = lr
+
 
 # =========================
 # main trainer: AMP + DDP
@@ -507,9 +529,9 @@ def train_model_ddp(
     mid_lr: float = 3e-4,
     main_lr: float = 1e-4,
     scheduler: Any | None = None,
-    scheduler_step_on: str = "epoch",   # "epoch" | "valid_metric"
+    scheduler_step_on: str = "epoch",  # "epoch" | "valid_metric"
     monitor: str = "valid/loss",
-    monitor_mode: str = "min",          # "min" | "max"
+    monitor_mode: str = "min",  # "min" | "max"
     patience: int = 10,
     min_delta: float = 0.0,
     max_grad_norm: float | None = None,
@@ -524,7 +546,7 @@ def train_model_ddp(
     amp_dtype: torch.dtype = torch.float16,
     verbose: bool = True,
 ) -> dict[str, Any]:
-    
+
     model_config = asdict(model.config)
     device = torch.device(device)
     checkpoint_dir = Path(checkpoint_dir) / train_task_name
@@ -547,10 +569,11 @@ def train_model_ddp(
     if monitor_mode not in {"min", "max"}:
         raise ValueError(f"monitor_mode must be 'min' or 'max', got {monitor_mode}")
     if scheduler_step_on not in {"epoch", "valid_metric"}:
-        raise ValueError(f"scheduler_step_on must be 'epoch' or 'valid_metric', got {scheduler_step_on}")
+        raise ValueError(
+            f"scheduler_step_on must be 'epoch' or 'valid_metric', got {scheduler_step_on}"
+        )
 
-
-    def get_epoch_hyperparams(epoch: int) -> tuple[float, float]:
+    def get_epoch_hyperparams(epoch: int) -> dict[str, Any]:
         if epoch < warmup_epochs:
             train_loader = train_random_loader
             alpha_rank = warmup_alpha_rank
@@ -592,7 +615,11 @@ def train_model_ddp(
     history: list[dict[str, Any]] = []
 
     start_epoch_hyperparams = get_epoch_hyperparams(start_epoch)
-    best_metric = float("inf") if start_epoch_hyperparams["monitor_mode"] == "min" else -float("inf")
+    best_metric = (
+        float("inf")
+        if start_epoch_hyperparams["monitor_mode"] == "min"
+        else -float("inf")
+    )
     best_epoch = -1
     best_state_dict = None
     epochs_without_improve = 0
@@ -610,9 +637,15 @@ def train_model_ddp(
         start_epoch = int(ckpt["epoch"]) + 1
         best_metric = float(ckpt.get("best_metric", best_metric))
         history = ckpt.get("history", [])
-        monitor = ckpt.get("extra_state", {}).get("monitor", start_epoch_hyperparams["monitor"])
-        monitor_mode = ckpt.get("extra_state", {}).get("monitor_mode", start_epoch_hyperparams["monitor_mode"])
-        previous_monitor_model = ckpt.get("extra_state", {}).get("previous_monitor_model", None)
+        monitor = ckpt.get("extra_state", {}).get(
+            "monitor", start_epoch_hyperparams["monitor"]
+        )
+        monitor_mode = ckpt.get("extra_state", {}).get(
+            "monitor_mode", start_epoch_hyperparams["monitor_mode"]
+        )
+        previous_monitor_model = ckpt.get("extra_state", {}).get(
+            "previous_monitor_model", None
+        )
 
         if history:
             best_record = None
@@ -630,7 +663,9 @@ def train_model_ddp(
                 best_epoch = int(best_record["epoch"])
 
         if is_main_process() and verbose:
-            print(f"[Resume] from={resume_from} start_epoch={start_epoch} best_metric={best_metric:.6f}")
+            print(
+                f"[Resume] from={resume_from} start_epoch={start_epoch} best_metric={best_metric:.6f}"
+            )
 
     sync_resume_state = {
         "start_epoch": int(start_epoch),
@@ -644,7 +679,6 @@ def train_model_ddp(
     best_metric = sync_resume_state["best_metric"]
     best_epoch = sync_resume_state["best_epoch"]
     epochs_without_improve = sync_resume_state["epochs_without_improve"]
-
 
     barrier()
     previous_monitor_model = None
@@ -679,6 +713,7 @@ def train_model_ddp(
             model=model,
             loader=train_loader,
             device=device,
+            is_train=True,
             optimizer=optimizer,
             loss_type=loss_type,
             alpha_rank=alpha_rank,
@@ -693,6 +728,7 @@ def train_model_ddp(
             model=model,
             loader=valid_loader,
             device=device,
+            is_train=False,
             optimizer=None,
             loss_type=loss_type,
             alpha_rank=alpha_rank,
@@ -714,7 +750,9 @@ def train_model_ddp(
 
         current_metric = epoch_record.get(monitor)
         if current_metric is None:
-            raise KeyError(f"monitor='{monitor}' not found in epoch_record: {list(epoch_record.keys())}")
+            raise KeyError(
+                f"monitor='{monitor}' not found in epoch_record: {list(epoch_record.keys())}"
+            )
 
         sync_state = None
 
@@ -782,11 +820,12 @@ def train_model_ddp(
                 should_stop = True
 
             if verbose:
+
                 def g(k):
                     return epoch_record.get(k, float("nan"))
 
                 print(
-                    f"[Epoch {epoch+1:03d}/{num_epochs:03d}] "
+                    f"[Epoch {epoch + 1:03d}/{num_epochs:03d}] "
                     f"stage={stage} lr={epoch_record['lr']:.6e} "
                     f"{monitor}={current_metric:.6f} best={best_metric:.6f} "
                     f"patience={epochs_without_improve}/{patience}"

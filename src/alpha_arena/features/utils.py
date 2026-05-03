@@ -18,6 +18,7 @@ from alpha_arena.features.config import REQUIRED_COLUMNS
 # 输入校验
 # ---------------------------------------------------------------------------
 
+
 def _check_input(df: pd.DataFrame) -> pd.DataFrame:
     """校验输入 DataFrame 并做基础规范化。
 
@@ -52,6 +53,7 @@ def _check_input(df: pd.DataFrame) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 # 数值工具
 # ---------------------------------------------------------------------------
+
 
 def _safe_div(a: pd.Series, b: pd.Series, eps: float = 1e-12) -> pd.Series:
     """安全除法：分母加微小扰动，避免除零产生 inf / NaN。
@@ -88,6 +90,7 @@ def _rolling_zscore(s: pd.Series, window: int) -> pd.Series:
 # ---------------------------------------------------------------------------
 # 横截面工具
 # ---------------------------------------------------------------------------
+
 
 def _cross_sectional_zscore(
     df: pd.DataFrame,
@@ -153,9 +156,11 @@ def _cross_sectional_rank(
 
     return cs_rank
 
+
 # ---------------------------------------------------------------------------
 # 时间特征
 # ---------------------------------------------------------------------------
+
 
 def _add_time_features(g: pd.DataFrame) -> pd.DataFrame:
     """为单只股票的 DataFrame 追加日历周期特征。
@@ -176,8 +181,8 @@ def _add_time_features(g: pd.DataFrame) -> pd.DataFrame:
     g = g.copy()
     dt = g["date"]
 
-    dow = dt.dt.dayofweek          # 0=周一, 6=周日
-    month = dt.dt.month            # 1–12
+    dow = dt.dt.dayofweek  # 0=周一, 6=周日
+    month = dt.dt.month  # 1–12
     day_of_year = dt.dt.dayofyear  # 1–366
 
     g["dow_sin"] = np.sin(2 * np.pi * dow / 7.0)

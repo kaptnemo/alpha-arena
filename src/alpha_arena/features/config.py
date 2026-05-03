@@ -10,16 +10,20 @@ FeatureConfig 通过 dataclass 集中管理特征工程的所有开关和参数�
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional, Sequence, Literal
-from dataclasses import dataclass
+from typing import Literal
+from collections.abc import Sequence
 
-FeatureKind = Literal["numeric", "boolean", "cyclic", "mask", "target", "id", "cross_sectional", "other"]
+FeatureKind = Literal[
+    "numeric", "boolean", "cyclic", "mask", "target", "id", "cross_sectional", "other"
+]
+
 
 @dataclass(frozen=True)
 class FeatureSpec:
     name: str
     kind: FeatureKind
     dtype: str
+
 
 # ---------------------------------------------------------------------------
 # 输入列校验白名单：pipeline 入口处强制要求这些列存在
@@ -71,12 +75,15 @@ class FeatureConfig:
 
     price_windows: Sequence[int] = (5, 10, 20)
     vol_windows: Sequence[int] = (5, 10, 20)
-    zscore_windows: Sequence[int] = (10, 20,)
+    zscore_windows: Sequence[int] = (
+        10,
+        20,
+    )
     cross_sectional_rank: bool = True
     add_time_features: bool = True
     add_return_features: bool = True
     add_risk_adjusted_features: bool = True
     add_ta_features: bool = True
     add_pandas_ta_features: bool = True
-    fill_method: str = "none"       # "none" | "ffill"
-    clip_return: Optional[float] = 0.2
+    fill_method: str = "none"  # "none" | "ffill"
+    clip_return: float | None = 0.2

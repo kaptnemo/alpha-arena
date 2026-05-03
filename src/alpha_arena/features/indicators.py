@@ -1,12 +1,11 @@
 import pandas as pd
 
-from stockstats import wrap
+from stockstats import wrap  # type: ignore[import-untyped]
 from alpha_arena.data.loader import load_from_parquet
 
 
-DEFAULT_INDICATORS = ['macd', 'macdh', 'macds', 'rsi']
+DEFAULT_INDICATORS = ["macd", "macdh", "macds", "rsi"]
 
-import pandas_ta_classic as ta  # 推荐导入别名
 
 # 定义需要计算的指标及其参数
 # pandas-ta 的指标函数名通常是小写，如 'macd', 'rsi'
@@ -14,6 +13,7 @@ INDICATOR_CONFIG = [
     {"kind": "macd", "fast": 12, "slow": 26, "signal": 9},
     {"kind": "rsi", "length": 14},
 ]
+
 
 def calculate_indicators_pdta(df: pd.DataFrame) -> pd.DataFrame:
     """
@@ -31,25 +31,26 @@ def calculate_indicators_pdta(df: pd.DataFrame) -> pd.DataFrame:
     返回:
         pd.DataFrame: 以 (ts_code, date) 为多级索引，包含原始列及所有新增技术指标。
     """
-    required_columns = ['ts_code', 'trade_date', 'open', 'high', 'low', 'close', 'vol']
+    required_columns = ["ts_code", "trade_date", "open", "high", "low", "close", "vol"]
     for col in required_columns:
         if col not in df.columns:
             raise ValueError(f"Missing required column: {col}")
 
-    df['date'] = pd.to_datetime(df['date'])
-    df = df.sort_values(['ts_code', 'date']).reset_index(drop=True)
+    df["date"] = pd.to_datetime(df["date"])
+    df = df.sort_values(["ts_code", "date"]).reset_index(drop=True)
 
     results = []
-    for _, group in df.groupby('ts_code', sort=False):
+    for _, group in df.groupby("ts_code", sort=False):
         # set_index 返回新 DataFrame，不影响原 df，无需 copy()
-        stock_df = group.set_index('date')
+        stock_df = group.set_index("date")
         for cfg in INDICATOR_CONFIG:
-            method = getattr(stock_df.ta, cfg['kind'])
-            params = {k: v for k, v in cfg.items() if k != 'kind'}
+            kind = str(cfg["kind"])
+            method = getattr(stock_df.ta, kind)
+            params = {k: v for k, v in cfg.items() if k != "kind"}
             method(**params, append=True)
         results.append(stock_df.reset_index())
 
-    return pd.concat(results, ignore_index=True).set_index(['ts_code', 'date'])
+    return pd.concat(results, ignore_index=True).set_index(["ts_code", "date"])
 
 
 def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
@@ -72,30 +73,32 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
     pd.DataFrame
         以 (ts_code, date) 为多级索引，包含原始列及 DEFAULT_INDICATORS 中的指标列。
     """
-    required_columns = ['ts_code', 'trade_date', 'open', 'high', 'low', 'close', 'vol']
+    required_columns = ["ts_code", "trade_date", "open", "high", "low", "close", "vol"]
     for col in required_columns:
         if col not in df.columns:
             raise ValueError(f"Missing required column: {col}")
 
-    df = df.sort_values(['ts_code', 'date']).reset_index(drop=True)
+    df = df.sort_values(["ts_code", "date"]).reset_index(drop=True)
 
     indicator_parts = []
-    for ts_code, group in df.groupby('ts_code', sort=False):
+    for ts_code, group in df.groupby("ts_code", sort=False):
         sdf = wrap(group.copy())
         ind_df = sdf.get(DEFAULT_INDICATORS).reset_index()
-        ind_df['ts_code'] = ts_code
+        ind_df["ts_code"] = ts_code
         indicator_parts.append(ind_df)
 
     all_indicators = pd.concat(indicator_parts, ignore_index=True)
-    result_df = df.merge(all_indicators, on=['ts_code', 'date'], how='left')
-    return result_df.set_index(['ts_code', 'date'])
+    result_df = df.merge(all_indicators, on=["ts_code", "date"], how="left")
+    return result_df.set_index(["ts_code", "date"])
 
 
 if __name__ == "__main__":
     import time
     import logging
 
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s"
+    )
     logger = logging.getLogger(__name__)
 
     file_path = "csi300_stocks_2021_2022.parquet"

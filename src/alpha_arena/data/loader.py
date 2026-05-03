@@ -1,5 +1,6 @@
 import pandas as pd
 from pathlib import Path
+
 # from torch.utils.data import Dataset, DataLoader
 from alpha_arena.data import (
     RAW_DATA_DIR,
@@ -25,7 +26,7 @@ def is_full_path(path_str: str) -> bool:
 def load_from_parquet(file_path: str | Path, **kwargs):
     """Load data from a parquet file and return a DataFrame."""
     file_path = Path(file_path)
-    if file_path.suffix != '.parquet':
+    if file_path.suffix != ".parquet":
         raise ValueError("Unsupported file format. Only parquet files are supported.")
     if is_full_path(str(file_path)):
         logger.info("Loading data from specified file path", file_path=str(file_path))
@@ -39,8 +40,12 @@ def load_from_parquet(file_path: str | Path, **kwargs):
 
 if __name__ == "__main__":
     from alpha_arena.data import DATASET_DATA_DIR
+
     # Example usage
-    new_file_path = DATASET_DATA_DIR / "csi300_2017_2025_seq60_step5_targets_5_10_20_label_y_ret_5_train_metadata.parquet"
+    new_file_path = (
+        DATASET_DATA_DIR
+        / "csi300_2017_2025_seq60_step5_targets_5_10_20_label_y_ret_5_train_metadata.parquet"
+    )
     df = load_from_parquet(new_file_path)
     print(df.head())
     print(df.tail())

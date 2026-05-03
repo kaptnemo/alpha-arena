@@ -27,7 +27,6 @@ def daily_ci(
     包含日期、指标均值、下限和上限的DataFrame。
     """
 
-
     results = []
     for date, group in df.groupby(group_col):
         y_true = group[target_col].values
@@ -41,5 +40,7 @@ def daily_ci(
         upper_bound = np.percentile(metric_values, (1 + ci_level) / 2 * 100)
         mean_metric = np.mean(metric_values)
         results.append((date, mean_metric, lower_bound, upper_bound))
-    
-    return pd.DataFrame(results, columns=[group_col, "metric_mean", "ci_lower", "ci_upper"])
+
+    return pd.DataFrame(
+        results, columns=[group_col, "metric_mean", "ci_lower", "ci_upper"]
+    )

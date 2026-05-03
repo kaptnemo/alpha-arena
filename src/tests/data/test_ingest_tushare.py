@@ -17,13 +17,15 @@ class _FakeTuShareHelper:
     def __init__(self, calls: dict[str, str]) -> None:
         self.calls = calls
 
-    def __enter__(self) -> "_FakeTuShareHelper":
+    def __enter__(self) -> _FakeTuShareHelper:
         return self
 
     def __exit__(self, exc_type, exc, tb) -> None:
         return None
 
-    def index_weight(self, index_code: str, start_date: str, end_date: str) -> _FakeResult:
+    def index_weight(
+        self, index_code: str, start_date: str, end_date: str
+    ) -> _FakeResult:
         self.calls["index_code"] = index_code
         self.calls["start_date"] = start_date
         self.calls["end_date"] = end_date
@@ -69,10 +71,14 @@ def test__index_stocks_uses_selected_index_name_for_output_and_membership_column
     calls: dict[str, str] = {}
 
     monkeypatch.setattr(ingest_tushare, "RAW_DATA_DIR", tmp_path)
-    monkeypatch.setattr(ingest_tushare, "TuShareHelper", lambda: _FakeTuShareHelper(calls))
+    monkeypatch.setattr(
+        ingest_tushare, "TuShareHelper", lambda: _FakeTuShareHelper(calls)
+    )
     monkeypatch.setattr(ingest_tushare.time, "sleep", lambda _: None)
 
-    ingest_tushare._index_stocks("2023", "2023", storage_format="csv", index_name="csi500")
+    ingest_tushare._index_stocks(
+        "2023", "2023", storage_format="csv", index_name="csi500"
+    )
 
     output_path = tmp_path / "csi500_stocks_2023_2023.csv"
     assert output_path.exists()

@@ -10,7 +10,6 @@ from alpha_arena.train.dataset.loader import (
 from alpha_arena.train.trainer import (
     train_model_ddp,
     setup_ddp,
-    cleanup_ddp,
 )
 
 from alpha_arena.models.aedh_lstm import (
@@ -20,13 +19,13 @@ from alpha_arena.models.aedh_lstm import (
 
 
 def create_dataloader(
-    train_dataset: SequenceDataset,
-    valid_dataset: SequenceDataset,
-    batch_size: int
+    train_dataset: SequenceDataset, valid_dataset: SequenceDataset, batch_size: int
 ) -> dict[str, DataLoader]:
     # 创建分布式采样器
-    distributed_sampler = DistributedSampler(train_dataset)
-    
+    distributed_sampler: DistributedSampler[SequenceDataset] = DistributedSampler(
+        train_dataset
+    )
+
     # 创建分布式按日期分组的批次采样器
     grouped_batch_sampler = DistributedGroupedByDateBatchSampler(
         train_dataset,
@@ -34,7 +33,7 @@ def create_dataloader(
         shuffle=True,  # 是否在每个 epoch 重新打乱日期顺序
         drop_last=False,  # 是否丢弃最后一个不足 batch_size 的批次
     )
-    
+
     # 创建 DataLoader，使用分布式按日期分组的批次采样器
     train_grouped_loader = DataLoader(
         train_dataset,
@@ -42,8 +41,8 @@ def create_dataloader(
         num_workers=4,  # 根据需要调整
         pin_memory=True,
         collate_fn=collate_fn,
-        persistent_workers=True,    # 很推荐
-        prefetch_factor=2,          # 默认通常够，必要时可试 4
+        persistent_workers=True,  # 很推荐
+        prefetch_factor=2,  # 默认通常够，必要时可试 4
     )
 
     train_random_loader = DataLoader(
@@ -53,11 +52,13 @@ def create_dataloader(
         num_workers=4,  # 根据需要调整
         pin_memory=True,
         collate_fn=collate_fn,
-        persistent_workers=True,    # 很推荐
-        prefetch_factor=2,          # 默认通常够，必要时可试 4
+        persistent_workers=True,  # 很推荐
+        prefetch_factor=2,  # 默认通常够，必要时可试 4
     )
 
-    valid_distributed_sampler = DistributedSampler(valid_dataset, shuffle=False)  # 验证集使用分布式采样器但不打乱
+    valid_distributed_sampler: DistributedSampler[SequenceDataset] = DistributedSampler(
+        valid_dataset, shuffle=False
+    )  # 验证集使用分布式采样器但不打乱
     valid_loader = DataLoader(
         valid_dataset,
         batch_size=batch_size,
@@ -66,10 +67,9 @@ def create_dataloader(
         num_workers=4,  # 根据需要调整
         pin_memory=True,
         collate_fn=collate_fn,
-        persistent_workers=True,    # 很推荐
-        prefetch_factor=2,          # 默认通常够，必要时可试 4
+        persistent_workers=True,  # 很推荐
+        prefetch_factor=2,  # 默认通常够，必要时可试 4
     )
-
 
     return {
         "train_grouped_loader": train_grouped_loader,
@@ -147,7 +147,6 @@ def load_model_and_predict(path):
         prefetch_factor=2,
     )
 
-
     # === 推理 ===
     with torch.no_grad():
         for batch in data_loader:
@@ -159,13 +158,13 @@ def load_model_and_predict(path):
             break  # 这里只看一个批次
 
 
-
 def main():
     import datetime
+
     # 先设置好分布式环境
     setup_ddp()
 
-    train_task_name = f'train_{datetime.datetime.now().strftime("%Y%m%d_%H%M%S")}'
+    train_task_name = f"train_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
     # 创建模型
     config = AEDH_LSTMConfig(
@@ -175,9 +174,9 @@ def main():
         attn_dim=64,
         head_hidden_dim=64,
         dropout=0.1,
-        use_last_state = True,
-        cs_feature_dim = 36,
-        cs_feature_mask = True,
+        use_last_state=True,
+        cs_feature_dim=36,
+        cs_feature_mask=True,
     )
     model = AttentionEnhancedDualHeadLSTM(config)
 
@@ -186,8 +185,12 @@ def main():
 
     # 加载数据集
     dataset_name = "csi300_2017_2025_seq60_step5_targets_5_10_20_label_y_ret_5"
-    train_dataset = SequenceDataset(dataset_name=dataset_name, split_name="train", y_return_col="y_ret_5_cs_z")
-    valid_dataset = SequenceDataset(dataset_name=dataset_name, split_name="evaluate", y_return_col="y_ret_5_cs_z")
+    train_dataset = SequenceDataset(
+        dataset_name=dataset_name, split_name="train", y_return_col="y_ret_5_cs_z"
+    )
+    valid_dataset = SequenceDataset(
+        dataset_name=dataset_name, split_name="evaluate", y_return_col="y_ret_5_cs_z"
+    )
 
     dataloaders = create_dataloader(train_dataset, valid_dataset, batch_size=512)
     train_grouped_loader = dataloaders["train_grouped_loader"]
@@ -195,7 +198,7 @@ def main():
     valid_loader = dataloaders["valid_loader"]
 
     num_epochs = 100
-    mid_epochs = 20 
+    mid_epochs = 20
     warmup_epochs = 15
 
     # 训练模型
@@ -220,7 +223,7 @@ def main():
         mid_lr=3e-4,
         main_lr=1e-4,
         patience=30,
-        loss_type="gaussian_nll"
+        loss_type="gaussian_nll",
     )
 
     print("Training completed. Final results:", result)

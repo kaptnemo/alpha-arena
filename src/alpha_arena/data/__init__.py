@@ -1,8 +1,9 @@
-import tushare as ts
 import os
 from pathlib import Path
 
-TUSHARE_TOKEN = os.getenv('TUSHARE_TOKEN')
+import tushare as ts  # type: ignore[import-untyped]
+
+TUSHARE_TOKEN = os.getenv("TUSHARE_TOKEN")
 ts.set_token(TUSHARE_TOKEN)
 
 PROJECT_ROOT = Path(__file__).parents[3]

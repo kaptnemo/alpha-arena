@@ -12,7 +12,7 @@ targets.py
 
 from __future__ import annotations
 
-from typing import Sequence
+from collections.abc import Sequence
 
 import pandas as pd
 import numpy as np
@@ -126,7 +126,9 @@ def add_targets(
         # -------- 3) risk-adjusted return target --------
         if add_risk_adjusted_return and "volatility_20" in out.columns:
             ra_col = f"y_ret_{h}_ra"
-            out[ra_col] = _safe_div(out[ret_col], out["volatility_20"]).astype("float32")
+            out[ra_col] = _safe_div(out[ret_col], out["volatility_20"]).astype(
+                "float32"
+            )
             target_columns.append(ra_col)
 
     return out, target_columns

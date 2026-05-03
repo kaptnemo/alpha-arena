@@ -11,13 +11,14 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
-from typing import List
 
 from alpha_arena.features.config import FeatureConfig, FeatureSpec
 from alpha_arena.features.utils import _safe_div
 
 
-def _add_base_features(g: pd.DataFrame, cfg: FeatureConfig) -> tuple[pd.DataFrame, List[FeatureSpec]]:
+def _add_base_features(
+    g: pd.DataFrame, cfg: FeatureConfig
+) -> tuple[pd.DataFrame, list[FeatureSpec]]:
     """为单只股票构造基础价格 / 收益率 / 风险调整特征。
 
     所有特征均严格使用历史数据（无未来信息泄漏）：
@@ -110,9 +111,15 @@ def _add_base_features(g: pd.DataFrame, cfg: FeatureConfig) -> tuple[pd.DataFram
         roll_low = g["low"].rolling(w).min()
         roll_high = g["high"].rolling(w).max()
         g[f"price_pos_{w}"] = _safe_div(g["close"] - roll_low, roll_high - roll_low)
-        feature_specs.append(FeatureSpec(name=f"ret_{w}", kind="numeric", dtype="float32"))
-        feature_specs.append(FeatureSpec(name=f"ma_ratio_{w}", kind="numeric", dtype="float32"))
-        feature_specs.append(FeatureSpec(name=f"price_pos_{w}", kind="numeric", dtype="float32"))
+        feature_specs.append(
+            FeatureSpec(name=f"ret_{w}", kind="numeric", dtype="float32")
+        )
+        feature_specs.append(
+            FeatureSpec(name=f"ma_ratio_{w}", kind="numeric", dtype="float32")
+        )
+        feature_specs.append(
+            FeatureSpec(name=f"price_pos_{w}", kind="numeric", dtype="float32")
+        )
 
     # ------------------------------------------------------------------
     # 多周期波动率 / 量能特征
@@ -124,8 +131,12 @@ def _add_base_features(g: pd.DataFrame, cfg: FeatureConfig) -> tuple[pd.DataFram
         g[f"volume_ma_ratio_{w}"] = (
             _safe_div(g["volume"], g["volume"].rolling(w).mean()) - 1.0
         )
-        feature_specs.append(FeatureSpec(name=f"volatility_{w}", kind="numeric", dtype="float32"))
-        feature_specs.append(FeatureSpec(name=f"volume_ma_ratio_{w}", kind="numeric", dtype="float32"))
+        feature_specs.append(
+            FeatureSpec(name=f"volatility_{w}", kind="numeric", dtype="float32")
+        )
+        feature_specs.append(
+            FeatureSpec(name=f"volume_ma_ratio_{w}", kind="numeric", dtype="float32")
+        )
 
     # ------------------------------------------------------------------
     # 风险调整指标
@@ -145,8 +156,14 @@ def _add_base_features(g: pd.DataFrame, cfg: FeatureConfig) -> tuple[pd.DataFram
             # 相对于近期高点的回撤幅度，反映趋势持续 / 反转的强度
             roll_max = g["close"].rolling(w).max()
             g[f"drawdown_{w}"] = _safe_div(g["close"], roll_max) - 1.0
-            feature_specs.append(FeatureSpec(name=f"sharpe_like_{w}", kind="numeric", dtype="float32"))
-            feature_specs.append(FeatureSpec(name=f"sortino_like_{w}", kind="numeric", dtype="float32"))
-            feature_specs.append(FeatureSpec(name=f"drawdown_{w}", kind="numeric", dtype="float32"))
+            feature_specs.append(
+                FeatureSpec(name=f"sharpe_like_{w}", kind="numeric", dtype="float32")
+            )
+            feature_specs.append(
+                FeatureSpec(name=f"sortino_like_{w}", kind="numeric", dtype="float32")
+            )
+            feature_specs.append(
+                FeatureSpec(name=f"drawdown_{w}", kind="numeric", dtype="float32")
+            )
 
     return g, feature_specs

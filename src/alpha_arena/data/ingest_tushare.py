@@ -1,15 +1,15 @@
+from collections import OrderedDict
+
 import pandas as pd
 import re
 import time
 from pathlib import Path
-from collections import OrderedDict
 
 from alpha_arena.data import (
     RAW_DATA_DIR,
 )
 from alpha_arena.data.helpers.tushare_helper import (
     TuShareHelper,
-    TuShareResult,
 )
 from alpha_arena.utils import get_logger
 
@@ -79,14 +79,19 @@ def _stock_daily(
     if storage_format not in ["csv", "parquet"]:
         raise ValueError("Unsupported storage format. Use 'csv' or 'parquet'.")
     if file_path is None:
-        file_path = RAW_DATA_DIR / f"{code}_daily_{start_date}_{end_date}.{storage_format}"
+        file_path = (
+            RAW_DATA_DIR / f"{code}_daily_{start_date}_{end_date}.{storage_format}"
+        )
 
     with TuShareHelper() as helper:
-        daily_result = helper.daily(ts_code=code, start_date=start_date, end_date=end_date)
+        daily_result = helper.daily(
+            ts_code=code, start_date=start_date, end_date=end_date
+        )
         if storage_format == "csv":
             daily_result.save_to_csv(file_path)
         else:
             daily_result.save_to_parquet(file_path)
+
 
 # 生成每年每个月的月初月末日期范围对列表
 def _get_adjustment_date_pairs(start_year: str, end_year: str):
@@ -98,7 +103,9 @@ def _get_adjustment_date_pairs(start_year: str, end_year: str):
         else:
             start_date = f"{year}0101"
         end_date = f"{year}1231"
-        get_adjustment_date_pairs.append((pd.to_datetime(start_date), pd.to_datetime(end_date)))
+        get_adjustment_date_pairs.append(
+            (pd.to_datetime(start_date), pd.to_datetime(end_date))
+        )
     return get_adjustment_date_pairs
 
 
@@ -107,10 +114,12 @@ def _get_index_stocks(
     index_code: str,
     date_pair: tuple[pd.Timestamp, pd.Timestamp],
     pre_last_pair_stocks: tuple[pd.Timestamp, list[str]] | None = None,
-
-):
+) -> tuple[
+    OrderedDict[tuple[pd.Timestamp, pd.Timestamp], list[str]],
+    tuple[pd.Timestamp, list[str]] | None,
+]:
     """Ingest index stock list for a given date range.
-    
+
     tushare api index_weight 的用法是按月查询的，所以我们生成每个月的月初月末日期范围对，来查询每个月的股票列表。
     然后取每个月的第一个交易日的股票列表作为该月的股票列表。
     这个方法会造成最多一个月的误差，因为指数调整的生效日可能不是月初，
@@ -120,37 +129,46 @@ def _get_index_stocks(
 
     index_stocks_result = helper.index_weight(
         index_code=index_code,
-        start_date=start_date.strftime('%Y%m%d'),
-        end_date=end_date.strftime('%Y%m%d'),
+        start_date=start_date.strftime("%Y%m%d"),
+        end_date=end_date.strftime("%Y%m%d"),
     )
     df = index_stocks_result.data
-    df = df.sort_values('trade_date').reset_index(drop=True)
-    result = OrderedDict()
+    df = df.sort_values("trade_date").reset_index(drop=True)
+    result: OrderedDict[tuple[pd.Timestamp, pd.Timestamp], list[str]] = OrderedDict()
     if not df.empty:
-        trade_dates = df['trade_date'].unique()
+        trade_dates = df["trade_date"].unique()
         for i in range(len(trade_dates)):
             trade_date = trade_dates[i]
             if i == 0 and pre_last_pair_stocks:
-                _pre_start_date, pre_last_pair_stocks = pre_last_pair_stocks
+                _pre_start_date, previous_stocks = pre_last_pair_stocks
                 pre_start_date = _pre_start_date + pd.Timedelta(days=1)
                 pre_end_date = pd.Timestamp(trade_date) - pd.Timedelta(days=1)
-                result[(pre_start_date, pre_end_date)] = pre_last_pair_stocks
+                result[(pre_start_date, pre_end_date)] = previous_stocks
             post_trade_date = trade_dates[i + 1] if i + 1 < len(trade_dates) else None
-            stocks_on_date = df[df['trade_date'] == trade_date]['con_code'].tolist()
-            pair_end_date = pd.Timestamp(post_trade_date) - pd.Timedelta(days=1) if post_trade_date else end_date
+            stocks_on_date = df[df["trade_date"] == trade_date]["con_code"].tolist()
+            pair_end_date = (
+                pd.Timestamp(post_trade_date) - pd.Timedelta(days=1)
+                if post_trade_date
+                else end_date
+            )
             result[(pd.Timestamp(trade_date), pair_end_date)] = stocks_on_date
-    result_pre_last_pair_stocks = None
+    result_pre_last_pair_stocks: tuple[pd.Timestamp, list[str]] | None = None
     if result:
-        result_pre_last_pair_stocks = (list(result.keys())[-1][0], list(result.values())[-1])
+        result_pre_last_pair_stocks = (
+            list(result.keys())[-1][0],
+            list(result.values())[-1],
+        )
     return result, result_pre_last_pair_stocks
 
 
-def _check_date_ranges(ranges):
+def _check_date_ranges(
+    ranges: list[tuple[pd.Timestamp, pd.Timestamp]],
+) -> tuple[bool, list[str]]:
     """
     检查时间区间是否连续无间断、无重叠
-    
+
     ranges: List[(start_timestamp, end_timestamp)]
-    
+
     返回:
         is_valid: bool
         issues: list[str]
@@ -175,14 +193,10 @@ def _check_date_ranges(ranges):
         expected_next_start = curr_end + pd.Timedelta(days=1)
 
         if next_start > expected_next_start:
-            issues.append(
-                f"GAP between {curr_end.date()} and {next_start.date()}"
-            )
+            issues.append(f"GAP between {curr_end.date()} and {next_start.date()}")
 
         elif next_start < expected_next_start:
-            issues.append(
-                f"OVERLAP between {curr_end.date()} and {next_start.date()}"
-            )
+            issues.append(f"OVERLAP between {curr_end.date()} and {next_start.date()}")
 
     is_valid = len(issues) == 0
     return is_valid, issues
@@ -194,7 +208,7 @@ def _index_stocks_by_date_range(
     end_year: str,
     resolved_index_name: str,
     index_code: str,
-):
+) -> dict[str, list[tuple[pd.Timestamp, pd.Timestamp]]]:
     """Ingest index stock list for a given date range."""
     date_pairs = _get_adjustment_date_pairs(start_year, end_year)
     logger.info(
@@ -203,8 +217,10 @@ def _index_stocks_by_date_range(
         index_name=resolved_index_name,
         index_code=index_code,
     )
-    index_stocks_by_date_pairs = OrderedDict()
-    pre_last_pair_stocks = None
+    index_stocks_by_date_pairs: OrderedDict[
+        tuple[pd.Timestamp, pd.Timestamp], list[str]
+    ] = OrderedDict()
+    pre_last_pair_stocks: tuple[pd.Timestamp, list[str]] | None = None
     for date_pair in date_pairs:
         stock_dicts, pre_last_pair_stocks = _get_index_stocks(
             helper,
@@ -213,8 +229,10 @@ def _index_stocks_by_date_range(
             pre_last_pair_stocks,
         )
         index_stocks_by_date_pairs.update(stock_dicts)
-    
-    check_date_ranges_result, issues = _check_date_ranges(list(index_stocks_by_date_pairs.keys()))
+
+    check_date_ranges_result, issues = _check_date_ranges(
+        list(index_stocks_by_date_pairs.keys())
+    )
     if not check_date_ranges_result:
         logger.warning(
             "Date range issues detected",
@@ -229,13 +247,13 @@ def _index_stocks_by_date_range(
             index_code=index_code,
         )
 
-    stock_date_ranges = {}
+    stock_date_ranges: dict[str, list[tuple[pd.Timestamp, pd.Timestamp]]] = {}
     for date_pair, stocks in index_stocks_by_date_pairs.items():
         for stock in stocks:
             if stock not in stock_date_ranges:
                 stock_date_ranges[stock] = []
             stock_date_ranges[stock].append(date_pair)
-            if stock == '000001.SZ':
+            if stock == "000001.SZ":
                 logger.info(
                     "Tracked sample stock in index",
                     stock=stock,
@@ -247,7 +265,11 @@ def _index_stocks_by_date_range(
     return stock_date_ranges
 
 
-def _check_stock_in_index(stock_date_ranges, stock_code, date):
+def _check_stock_in_index(
+    stock_date_ranges: dict[str, list[tuple[pd.Timestamp, pd.Timestamp]]],
+    stock_code: str,
+    date: str | pd.Timestamp,
+) -> bool:
     """Check if a given stock code is in the target index on a given date."""
     if stock_code not in stock_date_ranges:
         return False
@@ -272,7 +294,10 @@ def _index_stocks(
     if file_path is None:
         if not RAW_DATA_DIR.exists():
             RAW_DATA_DIR.mkdir(parents=True)
-        file_path = RAW_DATA_DIR / f"{resolved_index_name}_stocks_{start_year}_{end_year}.{storage_format}"
+        file_path = (
+            RAW_DATA_DIR
+            / f"{resolved_index_name}_stocks_{start_year}_{end_year}.{storage_format}"
+        )
 
     all_fds = []
     with TuShareHelper() as helper:
@@ -293,15 +318,20 @@ def _index_stocks(
             total_unique_stocks=len(all_stocks),
         )
         for i, stock_code in enumerate(all_stocks):
-            start_date = f'{start_year}0101'
-            end_date = f'{end_year}1231'
-            daily_result = helper.daily(ts_code=stock_code, start_date=start_date, end_date=end_date)
+            start_date = f"{start_year}0101"
+            end_date = f"{end_year}1231"
+            daily_result = helper.daily(
+                ts_code=stock_code, start_date=start_date, end_date=end_date
+            )
             df = daily_result.data
-            df.rename(columns={
-                'trade_date': 'date',
-                'vol': 'volume',
-            }, inplace=True)
-            df[membership_column] = df['date'].apply(
+            df.rename(
+                columns={
+                    "trade_date": "date",
+                    "vol": "volume",
+                },
+                inplace=True,
+            )
+            df[membership_column] = df["date"].apply(
                 lambda x: _check_stock_in_index(stock_date_ranges, stock_code, x)
             )
             all_fds.append(df)
@@ -316,8 +346,10 @@ def _index_stocks(
             time.sleep(0.5)  # 避免请求过快
 
     if not all_fds:
-        raise ValueError("No data was fetched for any stock. Please check the date range and stock codes.")
-    
+        raise ValueError(
+            "No data was fetched for any stock. Please check the date range and stock codes."
+        )
+
     final_df = pd.concat(all_fds, ignore_index=True)
     final_df = final_df.drop_duplicates(subset=["ts_code", "date"])
     final_df = final_df.sort_values(["ts_code", "date"]).reset_index(drop=True)

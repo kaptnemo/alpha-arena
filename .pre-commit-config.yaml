@@ -1,0 +1,55 @@
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.3.0
+    hooks:
+    -   id: check-yaml
+    -   id: end-of-file-fixer
+    -   id: trailing-whitespace
+  - repo: local
+    hooks:
+      # ------------------------------
+      # Pyupgrade (Python 3.12+ 语法升级)
+      # ------------------------------
+      - id: pyupgrade
+        name: pyupgrade (local)
+        entry: poetry run pyupgrade
+        language: system
+        types: [python]
+        args: ["--py312-plus"]
+        pass_filenames: true
+
+      # ------------------------------
+      # Ruff lint (风格检查 + 自动修复)
+      # ------------------------------
+      - id: ruff
+        name: ruff (local)
+        entry: poetry run ruff
+        language: system
+        types: [python]
+        args: ["check", "--fix"]
+        pass_filenames: true
+
+      # ------------------------------
+      # Ruff format (代码格式化)
+      # ------------------------------
+      - id: ruff-format
+        name: ruff-format (local)
+        entry: poetry run ruff
+        language: system
+        types: [python]
+        args: ["format"]
+        pass_filenames: true
+
+      # ------------------------------
+      # Mypy
+      # ------------------------------
+      - id: mypy
+        name: mypy (local)
+        entry: poetry run mypy
+        language: system
+        types: [python]
+        args:
+          - "--pretty"
+          - "--show-error-codes"
+          - "--ignore-missing-imports"
+        pass_filenames: true

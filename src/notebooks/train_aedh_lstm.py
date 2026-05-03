@@ -5,11 +5,6 @@ import sys
 from pathlib import Path
 from typing import Any
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-SRC_DIR = PROJECT_ROOT / "src"
-if str(SRC_DIR) not in sys.path:
-    sys.path.insert(0, str(SRC_DIR))
-
 import matplotlib.pyplot as plt
 import pandas as pd
 import torch
@@ -27,6 +22,10 @@ from alpha_arena.train.dataset.loader import (
 from alpha_arena.train.trainer import train_model_ddp
 from alpha_arena.utils import configure_logging, get_logger
 
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+SRC_DIR = PROJECT_ROOT / "src"
+if str(SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(SRC_DIR))
 
 DEFAULT_DATASET_NAME = "csi300_2017_2025_seq60_step5_targets_5_10_20_label_y_ret_5"
 DEFAULT_CHECKPOINT_DIR = "checkpoints/notebooks/aedh_lstm"
@@ -117,8 +116,18 @@ def plot_loss_curves(
     history_frame = history_to_frame(history)
 
     fig, ax = plt.subplots(figsize=(10, 5))
-    ax.plot(history_frame["epoch"], history_frame["train/loss"], label="train/loss", linewidth=2)
-    ax.plot(history_frame["epoch"], history_frame["valid/loss"], label="valid/loss", linewidth=2)
+    ax.plot(
+        history_frame["epoch"],
+        history_frame["train/loss"],
+        label="train/loss",
+        linewidth=2,
+    )
+    ax.plot(
+        history_frame["epoch"],
+        history_frame["valid/loss"],
+        label="valid/loss",
+        linewidth=2,
+    )
     ax.set_title("Training Loss Curve")
     ax.set_xlabel("Epoch")
     ax.set_ylabel("Loss")
@@ -145,7 +154,9 @@ def resolve_device(device: str) -> torch.device:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Notebook-friendly AEDH-LSTM training script.")
+    parser = argparse.ArgumentParser(
+        description="Notebook-friendly AEDH-LSTM training script."
+    )
     parser.add_argument("--dataset-name", default=DEFAULT_DATASET_NAME)
     parser.add_argument("--batch-size", type=int, default=512)
     parser.add_argument("--num-workers", type=int, default=4)
@@ -159,7 +170,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda"])
     parser.add_argument("--checkpoint-dir", default=DEFAULT_CHECKPOINT_DIR)
     parser.add_argument("--plot-path", default=None)
-    parser.add_argument("--no-show", action="store_true", help="Save loss curve without calling plt.show().")
+    parser.add_argument(
+        "--no-show",
+        action="store_true",
+        help="Save loss curve without calling plt.show().",
+    )
     return parser
 
 
@@ -175,13 +190,17 @@ def main() -> int:
     if not checkpoint_dir.is_absolute():
         checkpoint_dir = PROJECT_ROOT / checkpoint_dir
 
-    plot_path = Path(args.plot_path) if args.plot_path else checkpoint_dir / "loss_curve.png"
+    plot_path = (
+        Path(args.plot_path) if args.plot_path else checkpoint_dir / "loss_curve.png"
+    )
     if not plot_path.is_absolute():
         plot_path = PROJECT_ROOT / plot_path
 
     logger.info("loading_dataset", dataset_name=args.dataset_name)
     train_dataset = SequenceDataset(dataset_name=args.dataset_name, split_name="train")
-    valid_dataset = SequenceDataset(dataset_name=args.dataset_name, split_name="evaluate")
+    valid_dataset = SequenceDataset(
+        dataset_name=args.dataset_name, split_name="evaluate"
+    )
 
     model_config = infer_model_config(train_dataset)
     logger.info(
@@ -216,6 +235,7 @@ def main() -> int:
         batch_size=args.batch_size,
     )
     result = train_model_ddp(
+        train_task_name="aedh_lstm_train",
         model=model,
         optimizer=optimizer,
         train_random_loader=dataloaders["train_random_loader"],
@@ -246,7 +266,11 @@ def main() -> int:
         history_path=str(checkpoint_dir / "history.json"),
         plot_path=str(plot_path),
     )
-    print(history_frame[["epoch", "stage", "train/loss", "valid/loss", "lr"]].tail().to_string(index=False))
+    print(
+        history_frame[["epoch", "stage", "train/loss", "valid/loss", "lr"]]
+        .tail()
+        .to_string(index=False)
+    )
     return 0
 
 

@@ -2,8 +2,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from dataclasses import dataclass
-from typing import Dict, Optional
-import pandas as pd
 
 
 @dataclass
@@ -11,7 +9,7 @@ class AEDH_LSTMConfig:
     input_dim: int
     hidden_dim: int = 128
     num_layers: int = 2
-    attn_dim: Optional[int] = None
+    attn_dim: int | None = None
     head_hidden_dim: int = 64
     dropout: float = 0.2
     use_last_state: bool = True
@@ -30,7 +28,9 @@ class TemporalAttention(nn.Module):
         attn_weights: [B, T]
     """
 
-    def __init__(self, hidden_dim: int, attn_dim: Optional[int] = None, dropout: float = 0.0):
+    def __init__(
+        self, hidden_dim: int, attn_dim: int | None = None, dropout: float = 0.0
+    ):
         super().__init__()
         attn_dim = attn_dim or hidden_dim
 
@@ -46,8 +46,8 @@ class TemporalAttention(nn.Module):
 
         x 的每一步都是一个交易日的特征向量，没有插入全零的 padding 行，因此不需要 mask。
         """
-        scores = self.score(x).squeeze(-1)            # [B, T]
-        attn_weights = torch.softmax(scores, dim=1)   # [B, T]
+        scores = self.score(x).squeeze(-1)  # [B, T]
+        attn_weights = torch.softmax(scores, dim=1)  # [B, T]
         context = torch.sum(x * attn_weights.unsqueeze(-1), dim=1)  # [B, H]
         return context, attn_weights
 
@@ -67,28 +67,35 @@ class MLPHead(nn.Module):
     ):
         super().__init__()
 
-        layers = [nn.Linear(input_dim, hidden_dim)]
+        layers: list[nn.Module] = [nn.Linear(input_dim, hidden_dim)]
         if use_layernorm:
             layers.append(nn.LayerNorm(hidden_dim))
-        layers.extend([
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim, output_dim),
-        ])
+        layers.extend(
+            [
+                nn.ReLU(),
+                nn.Dropout(dropout),
+                nn.Linear(hidden_dim, output_dim),
+            ]
+        )
         self.net = nn.Sequential(*layers)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.net(x)
 
 
-def check_tensor(name, x):
+def check_tensor(name: str, x: torch.Tensor) -> None:
     print(
         name,
-        "shape=", x.shape,
-        "nan=", torch.isnan(x).any().item(),
-        "inf=", torch.isinf(x).any().item(),
-        "min=", torch.nan_to_num(x, nan=0.0).min().item(),
-        "max=", torch.nan_to_num(x, nan=0.0).max().item(),
+        "shape=",
+        x.shape,
+        "nan=",
+        torch.isnan(x).any().item(),
+        "inf=",
+        torch.isinf(x).any().item(),
+        "min=",
+        torch.nan_to_num(x, nan=0.0).min().item(),
+        "max=",
+        torch.nan_to_num(x, nan=0.0).max().item(),
     )
 
 
@@ -188,18 +195,20 @@ class AttentionEnhancedDualHeadLSTM(nn.Module):
             use_layernorm=True,
         )
 
-    def __call__(self,
+    def __call__(
+        self,
         x_seq: torch.Tensor,
         x_cs: torch.Tensor,
         x_cs_mask: torch.Tensor,
-    ) -> Dict[str, torch.Tensor]:
+    ) -> dict[str, torch.Tensor]:
         return self.forward(x_seq, x_cs, x_cs_mask)
 
-    def forward(self,
+    def forward(
+        self,
         x_seq: torch.Tensor,
         x_cs: torch.Tensor,
         x_cs_mask: torch.Tensor,
-    ) -> Dict[str, torch.Tensor]:
+    ) -> dict[str, torch.Tensor]:
         """
         Args:
             x: [B, T, F]
@@ -217,14 +226,14 @@ class AttentionEnhancedDualHeadLSTM(nn.Module):
         # check_tensor("x_seq", x_seq)
         # check_tensor("x_cs", x_cs)
         # check_tensor("x_cs_mask", x_cs_mask)
-        x = self.input_proj(x_seq)                 # [B, T, F]
-        lstm_out, _ = self.lstm(x)             # [B, T, H]
+        x = self.input_proj(x_seq)  # [B, T, F]
+        lstm_out, _ = self.lstm(x)  # [B, T, H]
 
-        context, attn_weights = self.attention(lstm_out)   # [B, H], [B, T]
+        context, attn_weights = self.attention(lstm_out)  # [B, H], [B, T]
 
         parts = [context]
         if self.use_last_state:
-            last_state = lstm_out[:, -1, :]   # [B, H]
+            last_state = lstm_out[:, -1, :]  # [B, H]
             parts.append(last_state)
         parts.append(x_cs)
         if self.config.cs_feature_mask and x_cs_mask is not None:
@@ -234,7 +243,7 @@ class AttentionEnhancedDualHeadLSTM(nn.Module):
 
         features = self.fusion(features)
 
-        pred_return = self.return_head(features).squeeze(-1)   # [B]
+        pred_return = self.return_head(features).squeeze(-1)  # [B]
 
         raw_var = self.risk_head(features).squeeze(-1)
         pred_var = F.softplus(raw_var) + 1e-6
@@ -242,12 +251,12 @@ class AttentionEnhancedDualHeadLSTM(nn.Module):
         pred_vol = torch.sqrt(pred_var)
 
         return {
-            "pred_return": pred_return,            # shape [B]
-            "pred_logvar": pred_logvar,            # 方便计算 NLL loss shape [B]
-            "pred_var": pred_var,                  # 方便监控预测的方差水平 shape [B]
-            "pred_vol": pred_vol,                  # 方便监控预测的标准差水平 shape [B]
-            "attn_weights": attn_weights,          # shape [B, T], for potential further analysis
-            "features": features,                  # shape [B, D], for potential further analysis
+            "pred_return": pred_return,  # shape [B]
+            "pred_logvar": pred_logvar,  # 方便计算 NLL loss shape [B]
+            "pred_var": pred_var,  # 方便监控预测的方差水平 shape [B]
+            "pred_vol": pred_vol,  # 方便监控预测的标准差水平 shape [B]
+            "attn_weights": attn_weights,  # shape [B, T], for potential further analysis
+            "features": features,  # shape [B, D], for potential further analysis
         }
 
     @staticmethod
@@ -364,7 +373,6 @@ class AttentionEnhancedDualHeadLSTM(nn.Module):
 
         return torch.stack(losses).mean()
 
-
     def compute_loss(
         self,
         batch: dict,
@@ -387,7 +395,9 @@ class AttentionEnhancedDualHeadLSTM(nn.Module):
         # check_tensor("pred_var_clamped", pred_var_clamped)
 
         pred_return = torch.nan_to_num(pred_return, nan=0.0, posinf=1e4, neginf=-1e4)
-        target_return = torch.nan_to_num(target_return, nan=0.0, posinf=1e4, neginf=-1e4)
+        target_return = torch.nan_to_num(
+            target_return, nan=0.0, posinf=1e4, neginf=-1e4
+        )
         pred_var = torch.nan_to_num(pred_var, nan=1.0, posinf=10.0, neginf=var_min)
 
         if pred_return.ndim > 1:
@@ -413,7 +423,7 @@ class AttentionEnhancedDualHeadLSTM(nn.Module):
                 target=target_return,
                 var=pred_var_clamped,
                 full=False,
-                reduction="mean"
+                reduction="mean",
             )
             base_loss = nll_loss
 
@@ -475,13 +485,13 @@ class AttentionEnhancedDualHeadLSTM(nn.Module):
 
     def compute_loss_legacy(
         self,
-        outputs: Dict[str, torch.Tensor],
+        outputs: dict[str, torch.Tensor],
         target_return: torch.Tensor,
         loss_type: str = "gaussian_nll",
         alpha_rank: float = 0.0,
-        alpha_mse: float = 0.0,   # ⭐ 新增
-        var_min: float = 1e-4,    # ⭐ 防止 variance collapse
-    ) -> Dict[str, torch.Tensor]:
+        alpha_mse: float = 0.0,  # ⭐ 新增
+        var_min: float = 1e-4,  # ⭐ 防止 variance collapse
+    ) -> dict[str, torch.Tensor]:
 
         pred_return = outputs["pred_return"]
         pred_var = outputs["pred_var"]
@@ -504,7 +514,7 @@ class AttentionEnhancedDualHeadLSTM(nn.Module):
                 target=target_return,
                 var=pred_var,
                 full=False,
-                reduction="mean"
+                reduction="mean",
             )
             base_loss = nll_loss
 
@@ -526,9 +536,7 @@ class AttentionEnhancedDualHeadLSTM(nn.Module):
         # =====================
         # 5. total loss
         # =====================
-        total_loss = base_loss \
-                + alpha_mse * mse_loss \
-                + alpha_rank * rank_loss
+        total_loss = base_loss + alpha_mse * mse_loss + alpha_rank * rank_loss
 
         # =====================
         # 6. 额外监控（强烈推荐）
@@ -549,13 +557,12 @@ class AttentionEnhancedDualHeadLSTM(nn.Module):
             "pred_return_std": pred_return.std(unbiased=False).detach(),
         }
 
-
     def predict(
         self,
         x_seq: torch.Tensor,
         x_cs: torch.Tensor,
         x_cs_mask: torch.Tensor,
-    ) -> Dict[str, torch.Tensor]:
+    ) -> dict[str, torch.Tensor]:
         self.eval()
         with torch.no_grad():
             return self.forward(x_seq, x_cs, x_cs_mask)

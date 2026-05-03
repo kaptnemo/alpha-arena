@@ -13,12 +13,17 @@ from __future__ import annotations
 
 import re
 import warnings
-from typing import Callable
+from collections.abc import Callable
 
 import numpy as np
 import pandas as pd
 
-from ta.momentum import RSIIndicator, StochasticOscillator, ROCIndicator, WilliamsRIndicator
+from ta.momentum import (
+    RSIIndicator,
+    StochasticOscillator,
+    ROCIndicator,
+    WilliamsRIndicator,
+)
 from ta.trend import MACD, CCIIndicator, ADXIndicator
 from ta.volatility import AverageTrueRange, BollingerBands
 from ta.volume import OnBalanceVolumeIndicator, ChaikinMoneyFlowIndicator, MFIIndicator
@@ -39,6 +44,7 @@ except ImportError:
 # ---------------------------------------------------------------------------
 # ta 库指标
 # ---------------------------------------------------------------------------
+
 
 def _add_ta_library_features(g: pd.DataFrame) -> tuple[pd.DataFrame, list[FeatureSpec]]:
     """使用 `ta` 库为单只股票追加标准技术指标。
@@ -114,9 +120,13 @@ def _add_ta_library_features(g: pd.DataFrame) -> tuple[pd.DataFrame, list[Featur
     # --- 动量 ---
     g["rsi_14"] = RSIIndicator(close=close, window=14).rsi()
     g["roc_10"] = ROCIndicator(close=close, window=10).roc()
-    g["willr_14"] = WilliamsRIndicator(high=high, low=low, close=close, lbp=14).williams_r()
+    g["willr_14"] = WilliamsRIndicator(
+        high=high, low=low, close=close, lbp=14
+    ).williams_r()
 
-    stoch = StochasticOscillator(high=high, low=low, close=close, window=14, smooth_window=3)
+    stoch = StochasticOscillator(
+        high=high, low=low, close=close, window=14, smooth_window=3
+    )
     g["stoch_k_14"] = stoch.stoch()
     g["stoch_d_14"] = stoch.stoch_signal()
 
@@ -131,7 +141,9 @@ def _add_ta_library_features(g: pd.DataFrame) -> tuple[pd.DataFrame, list[Featur
     g["adx_14"] = ADXIndicator(high=high, low=low, close=close, window=14).adx()
 
     # --- 波动率 ---
-    g["atr_14"] = AverageTrueRange(high=high, low=low, close=close, window=14).average_true_range()
+    g["atr_14"] = AverageTrueRange(
+        high=high, low=low, close=close, window=14
+    ).average_true_range()
 
     bb = BollingerBands(close=close, window=20, window_dev=2)
     g["bb_h"] = bb.bollinger_hband()
@@ -139,13 +151,11 @@ def _add_ta_library_features(g: pd.DataFrame) -> tuple[pd.DataFrame, list[Featur
     g["bb_m"] = bb.bollinger_mavg()
     # 布林带宽度：值越大，近期波动越剧烈
     g["bb_width"] = _safe_div(
-        bb.bollinger_hband() - bb.bollinger_lband(),
-        bb.bollinger_mavg()
+        bb.bollinger_hband() - bb.bollinger_lband(), bb.bollinger_mavg()
     )
     # 收盘价在布林带内的位置：>0.8 视为偏上轨，<0.2 视为偏下轨
     g["bb_pos"] = _safe_div(
-        close - bb.bollinger_lband(),
-        bb.bollinger_hband() - bb.bollinger_lband()
+        close - bb.bollinger_lband(), bb.bollinger_hband() - bb.bollinger_lband()
     )
 
     # --- 量能 ---
@@ -163,6 +173,7 @@ def _add_ta_library_features(g: pd.DataFrame) -> tuple[pd.DataFrame, list[Featur
 # ---------------------------------------------------------------------------
 # pandas-ta 扩展指标
 # ---------------------------------------------------------------------------
+
 
 def _add_pandas_ta_features(g: pd.DataFrame) -> tuple[pd.DataFrame, list[FeatureSpec]]:
     """为单只股票追加 pandas-ta 技术指标。
@@ -213,7 +224,9 @@ def _add_pandas_ta_features(g: pd.DataFrame) -> tuple[pd.DataFrame, list[Feature
         except Exception as e:
             warnings.warn(f"[pandas-ta] feature '{name}' failed: {e}", RuntimeWarning)
 
-    def _safe_assign(df: pd.DataFrame, col_name: str, values: pd.Series | np.ndarray) -> None:
+    def _safe_assign(
+        df: pd.DataFrame, col_name: str, values: pd.Series | np.ndarray
+    ) -> None:
         """安全写列：同名覆盖，不制造重复列。"""
         if isinstance(values, np.ndarray):
             values = pd.Series(values, index=df.index)
@@ -279,35 +292,51 @@ def _add_pandas_ta_features(g: pd.DataFrame) -> tuple[pd.DataFrame, list[Feature
             if re.search(r"supertd|supertrend.*dir|direction", lc):
                 _safe_assign(out, f"{prefix}_dir", st[c])
                 assigned.add(f"{prefix}_dir")
-                feature_specs.append(FeatureSpec(name=f"{prefix}_dir", kind="numeric", dtype="float32"))
+                feature_specs.append(
+                    FeatureSpec(name=f"{prefix}_dir", kind="numeric", dtype="float32")
+                )
             elif re.search(r"supertl|supertrend.*long", lc):
                 _safe_assign(out, f"{prefix}_long", st[c])
                 assigned.add(f"{prefix}_long")
-                feature_specs.append(FeatureSpec(name=f"{prefix}_long", kind="numeric", dtype="float32"))
+                feature_specs.append(
+                    FeatureSpec(name=f"{prefix}_long", kind="numeric", dtype="float32")
+                )
             elif re.search(r"superts|supertrend.*short", lc):
                 _safe_assign(out, f"{prefix}_short", st[c])
                 assigned.add(f"{prefix}_short")
-                feature_specs.append(FeatureSpec(name=f"{prefix}_short", kind="numeric", dtype="float32"))
+                feature_specs.append(
+                    FeatureSpec(name=f"{prefix}_short", kind="numeric", dtype="float32")
+                )
             elif re.search(r"supert(?![dls])|supertrend(?!.*(dir|long|short))", lc):
                 _safe_assign(out, f"{prefix}_line", st[c])
                 assigned.add(f"{prefix}_line")
-                feature_specs.append(FeatureSpec(name=f"{prefix}_line", kind="numeric", dtype="float32"))
+                feature_specs.append(
+                    FeatureSpec(name=f"{prefix}_line", kind="numeric", dtype="float32")
+                )
 
         # 万一版本返回列名不标准，按列位置兜底
         if not assigned:
             cols = list(st.columns)
             if len(cols) >= 1:
                 _safe_assign(out, f"{prefix}_line", st[cols[0]])
-                feature_specs.append(FeatureSpec(name=f"{prefix}_line", kind="numeric", dtype="float32"))
+                feature_specs.append(
+                    FeatureSpec(name=f"{prefix}_line", kind="numeric", dtype="float32")
+                )
             if len(cols) >= 2:
                 _safe_assign(out, f"{prefix}_dir", st[cols[1]])
-                feature_specs.append(FeatureSpec(name=f"{prefix}_dir", kind="numeric", dtype="float32"))
+                feature_specs.append(
+                    FeatureSpec(name=f"{prefix}_dir", kind="numeric", dtype="float32")
+                )
             if len(cols) >= 3:
                 _safe_assign(out, f"{prefix}_long", st[cols[2]])
-                feature_specs.append(FeatureSpec(name=f"{prefix}_long", kind="numeric", dtype="float32"))
+                feature_specs.append(
+                    FeatureSpec(name=f"{prefix}_long", kind="numeric", dtype="float32")
+                )
             if len(cols) >= 4:
                 _safe_assign(out, f"{prefix}_short", st[cols[3]])
-                feature_specs.append(FeatureSpec(name=f"{prefix}_short", kind="numeric", dtype="float32"))
+                feature_specs.append(
+                    FeatureSpec(name=f"{prefix}_short", kind="numeric", dtype="float32")
+                )
 
     _safe_run("supertrend", _add_supertrend)
 
@@ -340,27 +369,39 @@ def _add_pandas_ta_features(g: pd.DataFrame) -> tuple[pd.DataFrame, list[Feature
             if re.fullmatch(r"k(_.*)?", lc) or lc.startswith("k_"):
                 _safe_assign(out, f"{prefix}_k", kdj[c])
                 assigned.add(f"{prefix}_k")
-                feature_specs.append(FeatureSpec(name=f"{prefix}_k", kind="numeric", dtype="float32"))
+                feature_specs.append(
+                    FeatureSpec(name=f"{prefix}_k", kind="numeric", dtype="float32")
+                )
             elif re.fullmatch(r"d(_.*)?", lc) or lc.startswith("d_"):
                 _safe_assign(out, f"{prefix}_d", kdj[c])
                 assigned.add(f"{prefix}_d")
-                feature_specs.append(FeatureSpec(name=f"{prefix}_d", kind="numeric", dtype="float32"))
+                feature_specs.append(
+                    FeatureSpec(name=f"{prefix}_d", kind="numeric", dtype="float32")
+                )
             elif re.fullmatch(r"j(_.*)?", lc) or lc.startswith("j_"):
                 _safe_assign(out, f"{prefix}_j", kdj[c])
                 assigned.add(f"{prefix}_j")
-                feature_specs.append(FeatureSpec(name=f"{prefix}_j", kind="numeric", dtype="float32"))
+                feature_specs.append(
+                    FeatureSpec(name=f"{prefix}_j", kind="numeric", dtype="float32")
+                )
         # 兜底：按前三列位置映射
         if not assigned:
             cols = list(kdj.columns)
             if len(cols) >= 1:
                 _safe_assign(out, f"{prefix}_k", kdj[cols[0]])
-                feature_specs.append(FeatureSpec(name=f"{prefix}_k", kind="numeric", dtype="float32"))
+                feature_specs.append(
+                    FeatureSpec(name=f"{prefix}_k", kind="numeric", dtype="float32")
+                )
             if len(cols) >= 2:
                 _safe_assign(out, f"{prefix}_d", kdj[cols[1]])
-                feature_specs.append(FeatureSpec(name=f"{prefix}_d", kind="numeric", dtype="float32"))
+                feature_specs.append(
+                    FeatureSpec(name=f"{prefix}_d", kind="numeric", dtype="float32")
+                )
             if len(cols) >= 3:
                 _safe_assign(out, f"{prefix}_j", kdj[cols[2]])
-                feature_specs.append(FeatureSpec(name=f"{prefix}_j", kind="numeric", dtype="float32"))
+                feature_specs.append(
+                    FeatureSpec(name=f"{prefix}_j", kind="numeric", dtype="float32")
+                )
 
     _safe_run("kdj", _add_kdj)
 
@@ -372,7 +413,10 @@ def _add_pandas_ta_features(g: pd.DataFrame) -> tuple[pd.DataFrame, list[Feature
         er = pta.er(close, length=length)
         if er is not None and isinstance(er, pd.Series):
             _safe_assign(out, f"er_{length}", er)
-            feature_specs.append(FeatureSpec(name=f"er_{length}", kind="numeric", dtype="float32"))
+            feature_specs.append(
+                FeatureSpec(name=f"er_{length}", kind="numeric", dtype="float32")
+            )
+
     _safe_run("er", _add_er)
 
     # ------------------------------------------------------------------
@@ -383,7 +427,10 @@ def _add_pandas_ta_features(g: pd.DataFrame) -> tuple[pd.DataFrame, list[Feature
         natr = pta.natr(high=high, low=low, close=close, length=length)
         if natr is not None and isinstance(natr, pd.Series):
             _safe_assign(out, f"natr_{length}", natr)
-            feature_specs.append(FeatureSpec(name=f"natr_{length}", kind="numeric", dtype="float32"))
+            feature_specs.append(
+                FeatureSpec(name=f"natr_{length}", kind="numeric", dtype="float32")
+            )
+
     _safe_run("natr", _add_natr)
 
     # 最后一层保险，防止外部已有脏数据导致重复列

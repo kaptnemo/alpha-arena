@@ -68,7 +68,9 @@ def prepare_predictions_with_groups_frame(
 
     prepared = df.copy()
     prepared[date_col] = pd.to_datetime(prepared[date_col])
-    prepared[group_col] = pd.to_numeric(prepared[group_col], errors="coerce").astype("Int64")
+    prepared[group_col] = pd.to_numeric(prepared[group_col], errors="coerce").astype(
+        "Int64"
+    )
     prepared = prepared.sort_values([date_col, group_col]).reset_index(drop=True)
     return prepared
 
@@ -99,7 +101,9 @@ def _summarize_metric(series: pd.Series) -> dict[str, float | int]:
         "std": std,
         "ir": float(mean / std) if has_dispersion else float("nan"),
         "positive_ratio": float((s > 0).mean()),
-        "t_stat": float(mean / (std / np.sqrt(len(s)))) if has_dispersion and len(s) > 1 else float("nan"),
+        "t_stat": float(mean / (std / np.sqrt(len(s))))
+        if has_dispersion and len(s) > 1
+        else float("nan"),
         "q10": float(s.quantile(0.1)),
         "median": float(s.median()),
         "q90": float(s.quantile(0.9)),
@@ -194,7 +198,9 @@ def summarize_by_weekday(df: pd.DataFrame, date_col: str = "date") -> pd.DataFra
             rank_ic_mean=("rank_ic", "mean"),
         )
     )
-    weekday["weekday"] = pd.Categorical(weekday["weekday"], categories=weekday_order, ordered=True)
+    weekday["weekday"] = pd.Categorical(
+        weekday["weekday"], categories=weekday_order, ordered=True
+    )
     return weekday.sort_values("weekday").reset_index(drop=True)
 
 
@@ -296,7 +302,15 @@ def compute_daily_group_spread(
     )
     group_columns = [c for c in daily_group_returns.columns if c != date_col]
     if not group_columns:
-        return pd.DataFrame(columns=[date_col, "top_group", "bottom_group", "long_short_return", "monotonic"])
+        return pd.DataFrame(
+            columns=[
+                date_col,
+                "top_group",
+                "bottom_group",
+                "long_short_return",
+                "monotonic",
+            ]
+        )
 
     bottom_group = group_columns[0]
     top_group = group_columns[-1]
@@ -305,13 +319,16 @@ def compute_daily_group_spread(
     spread["bottom_group"] = spread[bottom_group]
     spread["long_short_return"] = spread["top_group"] - spread["bottom_group"]
     monotonic_pairs = [
-        daily_group_returns[group_columns[idx]] <= daily_group_returns[group_columns[idx + 1]]
+        daily_group_returns[group_columns[idx]]
+        <= daily_group_returns[group_columns[idx + 1]]
         for idx in range(len(group_columns) - 1)
     ]
     spread["monotonic"] = (
         pd.concat(monotonic_pairs, axis=1).all(axis=1) if monotonic_pairs else True
     )
-    return spread[[date_col, "top_group", "bottom_group", "long_short_return", "monotonic"]]
+    return spread[
+        [date_col, "top_group", "bottom_group", "long_short_return", "monotonic"]
+    ]
 
 
 def _build_prediction_group_overview(
@@ -340,7 +357,9 @@ def _build_prediction_group_overview(
         "date_start": df[date_col].min(),
         "date_end": df[date_col].max(),
         "date_count": int(df[date_col].nunique()),
-        "ts_code_count": int(df["ts_code"].nunique()) if "ts_code" in df.columns else None,
+        "ts_code_count": int(df["ts_code"].nunique())
+        if "ts_code" in df.columns
+        else None,
         "group_count": int(group_values.nunique()),
         "groups": sorted(group_values.unique().tolist()),
         "pred_mean": float(df[pred_col].mean()),
@@ -348,9 +367,13 @@ def _build_prediction_group_overview(
         "daily_mean_n": float(df.groupby(date_col).size().mean()),
         "long_short_mean": float(daily_spread["long_short_return"].mean()),
         "long_short_std": float(daily_spread["long_short_return"].std(ddof=1)),
-        "long_short_positive_ratio": float((daily_spread["long_short_return"] > 0).mean()),
+        "long_short_positive_ratio": float(
+            (daily_spread["long_short_return"] > 0).mean()
+        ),
         "monotonic_ratio": float(daily_spread["monotonic"].mean()),
-        "complete_group_days": int(daily_group_returns.drop(columns=[date_col]).notna().all(axis=1).sum()),
+        "complete_group_days": int(
+            daily_group_returns.drop(columns=[date_col]).notna().all(axis=1).sum()
+        ),
     }
 
 
@@ -483,7 +506,9 @@ def render_ic_rankic_report_text(report: ICAnalysisReport) -> str:
     )
 
 
-def render_predictions_with_groups_report_text(report: PredictionGroupAnalysisReport) -> str:
+def render_predictions_with_groups_report_text(
+    report: PredictionGroupAnalysisReport,
+) -> str:
     overview = report.overview
     by_group = report.by_group
     top_group = by_group.iloc[-1] if not by_group.empty else None

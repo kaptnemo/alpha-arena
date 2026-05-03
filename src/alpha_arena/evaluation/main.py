@@ -1,7 +1,6 @@
 from alpha_arena.train.dataset.loader import (
     SequenceDataset,
     collate_fn,
-    GroupedByDateBatchSampler,
 )
 from torch.utils.data import DataLoader
 from alpha_arena.models.aedh_lstm import AttentionEnhancedDualHeadLSTM
@@ -69,14 +68,16 @@ def predict_with_model(model: AttentionEnhancedDualHeadLSTM, test_loader: DataLo
             x_cs_mask=x_cs_mask,
         )
 
-        df = pd.DataFrame({
-            "ts_code": ts_code,
-            "label_date": label_date,
-            "pred_return": outputs["pred_return"].cpu().numpy(),
-            "pred_var": outputs["pred_var"].cpu().numpy(),
-            "y_return": batch["y_return"].cpu().numpy(),
-            "y_risk": batch["y_risk"].cpu().numpy(),
-        })
+        df = pd.DataFrame(
+            {
+                "ts_code": ts_code,
+                "label_date": label_date,
+                "pred_return": outputs["pred_return"].cpu().numpy(),
+                "pred_var": outputs["pred_var"].cpu().numpy(),
+                "y_return": batch["y_return"].cpu().numpy(),
+                "y_risk": batch["y_risk"].cpu().numpy(),
+            }
+        )
         predictions.append(df)
         # break  # 先测试一个批次，确认流程正确后再去掉这个 break 来跑完整个测试集
     try:
@@ -99,7 +100,6 @@ def compute_metrics(predictions_df: pd.DataFrame):
     print(ic_rankic_df.head())
     summary = summarize_ic(ic_rankic_df)
 
-
     predictions_df = add_daily_grouping_by_prediction(
         predictions_df,
         date_col="label_date",
@@ -109,7 +109,6 @@ def compute_metrics(predictions_df: pd.DataFrame):
     )
 
     return ic_rankic_df, summary, predictions_df
-
 
 
 def main():
@@ -128,12 +127,17 @@ def main():
 
     ic_rankic_df, summary, predictions_df = compute_metrics(predictions_df)
 
-    ic_rankic_df.to_csv(EVALUATION_OUTPUT_DIR / f"{train_id}_ic_rankic_by_date.csv", index=False)
-    predictions_df.to_csv(EVALUATION_OUTPUT_DIR / f"{train_id}_predictions_with_groups.csv", index=False)
+    ic_rankic_df.to_csv(
+        EVALUATION_OUTPUT_DIR / f"{train_id}_ic_rankic_by_date.csv", index=False
+    )
+    predictions_df.to_csv(
+        EVALUATION_OUTPUT_DIR / f"{train_id}_predictions_with_groups.csv", index=False
+    )
 
     print(predictions_df.head())
     print(ic_rankic_df.head())
     print(summary)
+
 
 if __name__ == "__main__":
     main()

@@ -37,7 +37,12 @@ def test_analyze_ic_rankic_by_date_builds_expected_sections() -> None:
     assert report.overview["ic_neg_rank_ic_pos_days"] == 1
     assert report.yearly["year"].tolist() == [2024, 2025]
     assert report.monthly["month"].tolist() == ["2024-01", "2024-02", "2025-01"]
-    assert report.weekday["weekday"].tolist() == ["Tuesday", "Wednesday", "Thursday", "Friday"]
+    assert report.weekday["weekday"].tolist() == [
+        "Tuesday",
+        "Wednesday",
+        "Thursday",
+        "Friday",
+    ]
     assert "ic_2d" in report.rolling.columns
     assert len(report.best_rank_ic_days) == 2
     assert len(report.worst_rank_ic_days) == 2
@@ -66,7 +71,9 @@ def test_analyze_predictions_with_groups_builds_group_sections() -> None:
     df = pd.DataFrame(
         {
             "ts_code": ["000001.SZ", "000002.SZ", "000001.SZ", "000002.SZ"],
-            "label_date": pd.to_datetime(["2024-01-02", "2024-01-02", "2024-01-03", "2024-01-03"]),
+            "label_date": pd.to_datetime(
+                ["2024-01-02", "2024-01-02", "2024-01-03", "2024-01-03"]
+            ),
             "pred_return": [0.1, 0.2, 0.3, 0.4],
             "y_return": [0.01, 0.03, -0.02, 0.05],
             "pred_group": [1, 2, 1, 2],
@@ -79,10 +86,20 @@ def test_analyze_predictions_with_groups_builds_group_sections() -> None:
     assert report.overview["group_count"] == 2
     assert report.overview["complete_group_days"] == 2
     assert report.by_group["pred_group"].tolist() == [1, 2]
-    assert report.daily_group_returns.columns.tolist() == ["label_date", "group_1", "group_2"]
-    assert report.daily_group_counts.columns.tolist() == ["label_date", "group_1", "group_2"]
+    assert report.daily_group_returns.columns.tolist() == [
+        "label_date",
+        "group_1",
+        "group_2",
+    ]
+    assert report.daily_group_counts.columns.tolist() == [
+        "label_date",
+        "group_1",
+        "group_2",
+    ]
     assert "long_short_return" in report.daily_spread.columns
-    assert report.daily_spread["long_short_return"].tolist() == pytest.approx([0.02, 0.07])
+    assert report.daily_spread["long_short_return"].tolist() == pytest.approx(
+        [0.02, 0.07]
+    )
 
 
 def test_render_predictions_with_groups_report_text_contains_core_summary() -> None:

@@ -8,9 +8,8 @@ import multiprocessing
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Sequence
-import pyarrow as pa
-import pyarrow.parquet as pq
+from typing import Any
+from collections.abc import Callable, Sequence
 
 import numpy as np
 import pandas as pd
@@ -88,9 +87,9 @@ def _log_columns_once(
         logger.info(
             f"[pid={pid}] [step={step}] BEFORE columns ({len(before)}): {before}"
         )
-    logger.info(
-        f"[pid={pid}] [step={step}] AFTER  columns ({len(after)}): {after}"
-    )
+    logger.info(f"[pid={pid}] [step={step}] AFTER  columns ({len(after)}): {after}")
+
+
 _PROCESSED_CONFIG_SUFFIX = ".config.json"
 
 TradeCalendarProvider = Callable[
@@ -169,11 +168,17 @@ class ProcessedPanelConfig:
             sorted({int(horizon) for horizon in self.target_horizons})
         )
         if self.target_columns:
-            raise ValueError("target_columns should not be set in ProcessedPanelConfig; it is determined by target_horizons.")
+            raise ValueError(
+                "target_columns should not be set in ProcessedPanelConfig; it is determined by target_horizons."
+            )
         if self.cross_sectional_target_columns:
-            raise ValueError("cross_sectional_target_columns should not be set in ProcessedPanelConfig; it is determined by target_horizons.")
+            raise ValueError(
+                "cross_sectional_target_columns should not be set in ProcessedPanelConfig; it is determined by target_horizons."
+            )
         if self.feature_specs:
-            raise ValueError("feature_specs should not be set in ProcessedPanelConfig; it is determined by the features built in build_processed_panel.")
+            raise ValueError(
+                "feature_specs should not be set in ProcessedPanelConfig; it is determined by the features built in build_processed_panel."
+            )
         if not self.target_horizons:
             raise ValueError("target_horizons must not be empty.")
         if any(horizon <= 0 for horizon in self.target_horizons):
@@ -235,7 +240,9 @@ class DatasetBuilderConfig:
             raise ValueError(
                 "sequence.target_horizons must exactly match processed.target_horizons."
             )
-        object.__setattr__(self.sequence, "target_horizons", self.processed.target_horizons)
+        object.__setattr__(
+            self.sequence, "target_horizons", self.processed.target_horizons
+        )
         if self.label_column is None:
             self.label_column = f"y_ret_{min(self.processed.target_horizons)}"
         label_horizon = _target_column_horizon(self.label_column)
@@ -260,13 +267,21 @@ class DatasetBuilderConfig:
             if value <= 0
         }
         if invalid_intervals:
-            raise ValueError(f"All split start intervals must be positive, got {invalid_intervals}.")
+            raise ValueError(
+                f"All split start intervals must be positive, got {invalid_intervals}."
+            )
 
     def start_interval_by_split(self) -> dict[str, int]:
         return {
-            "train": self.sequence.start_interval if self.train_start_interval is None else int(self.train_start_interval),
-            "evaluate": self.sequence.start_interval if self.evaluate_start_interval is None else int(self.evaluate_start_interval),
-            "test": self.sequence.start_interval if self.test_start_interval is None else int(self.test_start_interval),
+            "train": self.sequence.start_interval
+            if self.train_start_interval is None
+            else int(self.train_start_interval),
+            "evaluate": self.sequence.start_interval
+            if self.evaluate_start_interval is None
+            else int(self.evaluate_start_interval),
+            "test": self.sequence.start_interval
+            if self.test_start_interval is None
+            else int(self.test_start_interval),
         }
 
 
@@ -313,8 +328,8 @@ class DatasetSplitFrames:
 
 @dataclass(frozen=True)
 class DatasetSplitPaths:
-    features_path: Path   # directory containing parquet parts
-    metadata_path: Path   # directory containing parquet parts
+    features_path: Path  # directory containing parquet parts
+    metadata_path: Path  # directory containing parquet parts
 
 
 @dataclass(frozen=True)
@@ -340,15 +355,17 @@ def update_feature_stats(stats, X):
         return FeatureStats(
             count=X.shape[0],
             sum_=X.sum(axis=0),
-            sumsq_=(X ** 2).sum(axis=0),
+            sumsq_=(X**2).sum(axis=0),
         )
     stats.count += X.shape[0]
     stats.sum_ += X.sum(axis=0)
-    stats.sumsq_ += (X ** 2).sum(axis=0)
+    stats.sumsq_ += (X**2).sum(axis=0)
     return stats
 
 
-def merge_feature_stats(stats_list: list[FeatureStats], n_features: int) -> FeatureStats:
+def merge_feature_stats(
+    stats_list: list[FeatureStats], n_features: int
+) -> FeatureStats:
     total_count = 0
     total_sum = np.zeros(n_features, dtype=np.float64)
     total_sumsq = np.zeros(n_features, dtype=np.float64)
@@ -376,7 +393,9 @@ def resolve_split_by_date(
     return None
 
 
-def iter_symbol_samples(args: DatasetSplitArgs) -> Iterator[tuple[str, dict]]:
+def iter_symbol_samples(
+    args: DatasetSplitArgs,
+) -> Iterator[tuple[str | None, dict[str, object]]]:
     symbol_df = args.symbol_df
     sequence_config = args.sequence_config
     ts_code = args.ts_code
@@ -425,7 +444,7 @@ def iter_symbol_samples(args: DatasetSplitArgs) -> Iterator[tuple[str, dict]]:
             )
             continue
 
-        label_date = target_info["label_dates"].get(label_column, pd.NaT)
+        label_date = target_info["label_dates"].get(label_column)
         target_value = target_info["targets"].get(label_column, np.nan)
         target_mask = target_info["target_mask"].get(label_column, 0.0)
         if pd.isna(label_date) or pd.isna(target_value) or target_mask <= 0.0:
@@ -443,8 +462,7 @@ def iter_symbol_samples(args: DatasetSplitArgs) -> Iterator[tuple[str, dict]]:
         start_date = window.iloc[0]["date"]
         end_date = window.iloc[-1]["date"]
         sample_id = (
-            f"{ts_code}:{start_date.strftime('%Y%m%d')}:"
-            f"{end_date.strftime('%Y%m%d')}"
+            f"{ts_code}:{start_date.strftime('%Y%m%d')}:{end_date.strftime('%Y%m%d')}"
         )
 
         metadata_row: dict[str, object] = {
@@ -464,30 +482,38 @@ def iter_symbol_samples(args: DatasetSplitArgs) -> Iterator[tuple[str, dict]]:
             ].get(target_col, 0.0)
 
         for cross_col in cross_sectional_columns:
-            metadata_row[cross_col] = target_info["cross_sectional"].get(cross_col, np.nan)
-            metadata_row[f"{cross_col}_mask"] = target_info["cross_sectional_mask"].get(cross_col, 0.0)
+            metadata_row[cross_col] = target_info["cross_sectional"].get(
+                cross_col, np.nan
+            )
+            metadata_row[f"{cross_col}_mask"] = target_info["cross_sectional_mask"].get(
+                cross_col, 0.0
+            )
 
         split_name = args.anchor_split_map.get(pd.Timestamp(anchor_date).normalize())
         yield split_name, metadata_row
 
 
-def select_cross_sectional_feature_columns(feature_specs: Sequence[FeatureSpec | dict]) -> list[str]:
+def select_cross_sectional_feature_columns(
+    feature_specs: Sequence[FeatureSpec | dict],
+) -> list[str]:
     """选择需要参与横截面特征计算的数值特征列。"""
     cross_sectional_columns = []
     for spec in feature_specs:
-        kind = spec['kind'] if isinstance(spec, dict) else spec.kind
-        name = spec['name'] if isinstance(spec, dict) else spec.name
+        kind = spec["kind"] if isinstance(spec, dict) else spec.kind
+        name = spec["name"] if isinstance(spec, dict) else spec.name
         if kind == "cross_sectional":
             cross_sectional_columns.append(name)
     return cross_sectional_columns
 
 
-def select_scaler_feature_columns(feature_specs: Sequence[FeatureSpec | dict]) -> list[str]:
+def select_scaler_feature_columns(
+    feature_specs: Sequence[FeatureSpec | dict],
+) -> list[str]:
     """选择需要参与预处理的连续数值特征，排除原始列和派生 z-score 列。"""
     scaler_feature_columns = []
     for spec in feature_specs:
-        kind = spec['kind'] if isinstance(spec, dict) else spec.kind
-        name = spec['name'] if isinstance(spec, dict) else spec.name
+        kind = spec["kind"] if isinstance(spec, dict) else spec.kind
+        name = spec["name"] if isinstance(spec, dict) else spec.name
         if (
             kind == "numeric"
             and name not in _RAW_COLS
@@ -498,7 +524,9 @@ def select_scaler_feature_columns(feature_specs: Sequence[FeatureSpec | dict]) -
 
 
 def filter_derived_zscore_feature_columns(feature_columns: Sequence[str]) -> list[str]:
-    return [name for name in feature_columns if not _ZSCORE_FEATURE_SUFFIX_RE.search(name)]
+    return [
+        name for name in feature_columns if not _ZSCORE_FEATURE_SUFFIX_RE.search(name)
+    ]
 
 
 def _bounded_feature_range(name: str) -> tuple[float, float] | None:
@@ -531,7 +559,7 @@ def classify_preprocess_feature_columns(
 
 
 def _subset_by_years(df: pd.DataFrame, years: Sequence[int]) -> pd.DataFrame:
-    years = tuple(sorted(set(int(year) for year in years)))
+    years = tuple(sorted({int(year) for year in years}))
     if not years:
         return df.iloc[0:0].copy()
     mask = pd.to_datetime(df["date"]).dt.year.isin(years)
@@ -561,7 +589,11 @@ def process_bounded_feature(name: str, x: pd.Series) -> pd.Series:
     lower, upper = bounds
     scale = max((upper - lower) / 2.0, 1e-6)
     center = (upper + lower) / 2.0
-    x = pd.to_numeric(x, errors="coerce").astype(np.float64).clip(lower=lower, upper=upper)
+    x = (
+        pd.to_numeric(x, errors="coerce")
+        .astype(np.float64)
+        .clip(lower=lower, upper=upper)
+    )
     return ((x - center) / scale).clip(-1.0, 1.0)
 
 
@@ -655,17 +687,21 @@ def preprocess_model_features(
 
     preprocessed_df = processed_df.copy()
     preprocessed_df["date"] = pd.to_datetime(preprocessed_df["date"]).dt.normalize()
-    preprocessed_df = preprocessed_df.sort_values(["ts_code", "date"], ignore_index=True)
+    preprocessed_df = preprocessed_df.sort_values(
+        ["ts_code", "date"], ignore_index=True
+    )
     preprocessed_df = preprocessed_df.astype(
         {col: "float64" for col in feature_columns if col in preprocessed_df.columns}
     )
 
-    bounded_features, ratio_features, normal_features = classify_preprocess_feature_columns(
-        feature_columns
+    bounded_features, ratio_features, normal_features = (
+        classify_preprocess_feature_columns(feature_columns)
     )
 
     for name in bounded_features:
-        preprocessed_df.loc[:, name] = process_bounded_feature(name, preprocessed_df[name])
+        preprocessed_df.loc[:, name] = process_bounded_feature(
+            name, preprocessed_df[name]
+        )
 
     for name in ratio_features:
         preprocessed_df.loc[:, name] = process_ratio_feature(preprocessed_df[name])
@@ -692,7 +728,9 @@ def _worker_get_dataset_metadata_task(
 
     sample_counts = {split_name: 0 for split_name in args.split_names}
 
-    metadata_rows: dict[str, list[dict]] = {split_name: [] for split_name in args.split_names}
+    metadata_rows: dict[str, list[dict]] = {
+        split_name: [] for split_name in args.split_names
+    }
     for dataset_split_args in symbol_tasks:
         for split_name, metadata_row in iter_symbol_samples(dataset_split_args):
             if split_name is None or metadata_row is None:
@@ -742,15 +780,19 @@ def build_and_save_dataset(
         start_interval_by_split=start_interval_by_split,
     )
     sample_anchor_calendar = pd.DatetimeIndex(sorted(anchor_split_map))
-    groups = [(ts_code, group) for ts_code, group in source_df.groupby("ts_code", sort=False)]
-    max_workers = num_workers or max(1, (os.cpu_count() or 1) - 1) if multiprocess else 1
+    groups = [
+        (ts_code, group) for ts_code, group in source_df.groupby("ts_code", sort=False)
+    ]
+    max_workers = (
+        num_workers or max(1, (os.cpu_count() or 1) - 1) if multiprocess else 1
+    )
     worker_count = max(1, min(max_workers, len(groups)))
 
     split_arg_list = [
         DatasetSplitArgs(
             symbol_df=group,
             sequence_config=sequence_config,
-            ts_code=ts_code,
+            ts_code=str(ts_code),
             feature_specs=feature_specs,
             calendar_positions=calendar_positions,
             sample_anchor_calendar=sample_anchor_calendar,
@@ -766,7 +808,7 @@ def build_and_save_dataset(
     batch_size = max(1, (len(split_arg_list) + worker_count - 1) // worker_count)
     batch_tasks = [
         DatasetMetadataArgs(
-            symbol_tasks=tuple(split_arg_list[i:i + batch_size]),
+            symbol_tasks=tuple(split_arg_list[i : i + batch_size]),
             split_names=split_names,
         )
         for _, i in enumerate(range(0, len(split_arg_list), batch_size))
@@ -778,7 +820,9 @@ def build_and_save_dataset(
         with ProcessPoolExecutor(max_workers=worker_count) as executor:
             results = list(executor.map(_worker_get_dataset_metadata_task, batch_tasks))
 
-    split_metadata_dfs: dict[str, list[pd.DataFrame]] = {split_name: [] for split_name in split_names}
+    split_metadata_dfs: dict[str, list[pd.DataFrame]] = {
+        split_name: [] for split_name in split_names
+    }
     for metadata_dfs, counts in results:
         for split_name, metadata_df in metadata_dfs.items():
             if not metadata_df.empty:
@@ -788,7 +832,9 @@ def build_and_save_dataset(
 
     for split_name in split_names:
         if split_metadata_dfs[split_name]:
-            full_metadata_df = pd.concat(split_metadata_dfs[split_name], ignore_index=True)
+            full_metadata_df = pd.concat(
+                split_metadata_dfs[split_name], ignore_index=True
+            )
         else:
             full_metadata_df = _empty_metadata_frame(target_columns)
 
@@ -808,12 +854,16 @@ def _normalize_calendar_dates(
     if isinstance(calendar, pd.DataFrame):
         if "cal_date" not in calendar.columns:
             raise ValueError("Trade calendar DataFrame must contain 'cal_date'.")
-        open_mask = calendar["is_open"].eq(1) if "is_open" in calendar.columns else True
-        dates = pd.to_datetime(calendar.loc[open_mask, "cal_date"])
+        cal_date_series = calendar["cal_date"]
+        if "is_open" in calendar.columns:
+            open_mask = calendar["is_open"].eq(1)
+            dates = pd.DatetimeIndex(pd.to_datetime(cal_date_series[open_mask]))
+        else:
+            dates = pd.DatetimeIndex(pd.to_datetime(cal_date_series))
     else:
-        dates = pd.to_datetime(pd.Index(calendar))
+        dates = pd.DatetimeIndex(pd.to_datetime(pd.Index(calendar)))
 
-    normalized = pd.DatetimeIndex(pd.Series(dates).dropna().drop_duplicates().sort_values())
+    normalized = dates.dropna().unique().sort_values()
     if normalized.empty:
         raise ValueError("Trade calendar is empty.")
     return normalized.normalize()
@@ -878,7 +928,8 @@ def add_cross_sectional_targets(
     - groupby 使用 date_col，通常应是 anchor_date / decision_date
     """
     target_columns = [
-        col for col in df.columns
+        col
+        for col in df.columns
         if any(col.startswith(prefix) for prefix in target_column_prefixes)
     ]
 
@@ -934,17 +985,29 @@ def build_processed_panel(config: ProcessedPanelConfig) -> ProcessedPanelBuildRe
             num_workers=config.num_workers,
         )
     else:
-        panel_df, feature_specs = build_panel_features(raw_df, cfg=config.feature_config)
-    _log_columns_once("build_panel_features", list(raw_df.columns), list(panel_df.columns))
-    processed_df, target_columns = add_targets(panel_df, horizons=config.target_horizons)
+        panel_df, feature_specs = build_panel_features(
+            raw_df, cfg=config.feature_config
+        )
+    _log_columns_once(
+        "build_panel_features", list(raw_df.columns), list(panel_df.columns)
+    )
+    processed_df, target_columns = add_targets(
+        panel_df, horizons=config.target_horizons
+    )
     _log_columns_once("add_targets", list(panel_df.columns), list(processed_df.columns))
-    logger.info(f"raw_df shape: {raw_df.shape}, panel_df shape: {panel_df.shape}, processed_df shape: {processed_df.shape}")
+    logger.info(
+        f"raw_df shape: {raw_df.shape}, panel_df shape: {panel_df.shape}, processed_df shape: {processed_df.shape}"
+    )
     processed_df, cross_sectional_target_columns = add_cross_sectional_targets(
         processed_df,
         target_column_prefixes=["y_ret_"],
         date_col="date",
     )
-    _log_columns_once("add_cross_sectional_targets", list(panel_df.columns), list(processed_df.columns))
+    _log_columns_once(
+        "add_cross_sectional_targets",
+        list(panel_df.columns),
+        list(processed_df.columns),
+    )
     processed_path = config.processed_path
     config_path = config.config_path
     processed_path.parent.mkdir(parents=True, exist_ok=True)
@@ -981,7 +1044,7 @@ def load_processed_panel(
     with config_path.open("r", encoding="utf-8") as fh:
         persisted_config = json.load(fh)
 
-    # _assert_processed_config_consistent(config, persisted_config)
+    _assert_processed_config_consistent(config, persisted_config)
     processed_df = load_from_parquet(str(processed_path))
     return processed_df, persisted_config
 
@@ -1143,7 +1206,7 @@ def _compute_targets_for_window(
     if anchor_position is None:
         return None
 
-    label_dates: dict[str, pd.Timestamp] = {}
+    label_dates: dict[str, pd.Timestamp | None] = {}
     targets: dict[str, float] = {}
     target_mask: dict[str, float] = {}
 
@@ -1156,14 +1219,14 @@ def _compute_targets_for_window(
     for col in target_columns:
         h = _target_column_horizon(col)
         if h is None:
-            label_dates[col] = pd.NaT
+            label_dates[col] = None
             targets[col] = np.nan
             target_mask[col] = 0.0
             continue
 
         future_position = anchor_position + h
         if future_position >= len(trading_calendar):
-            label_dates[col] = pd.NaT
+            label_dates[col] = None
             targets[col] = np.nan
             target_mask[col] = 0.0
             continue
@@ -1197,7 +1260,7 @@ def _compute_targets_for_window(
             cross_sectional[col] = 0.0
             cross_sectional_mask[col] = 0.0
             continue
-        
+
         cross_sectional[col] = float(value)
         cross_sectional_mask[col] = 1.0
 
@@ -1212,6 +1275,7 @@ def _compute_targets_for_window(
         "cross_sectional": cross_sectional,
         "cross_sectional_mask": cross_sectional_mask,
     }
+
 
 _RETURN_LABEL_PATTERN = re.compile(r"^y_ret_(\d+)$")
 _RETURN_CS_Z_LABEL_PATTERN = re.compile(r"^y_ret_(\d+)_cs_z$")
@@ -1276,10 +1340,7 @@ def build_and_save_features(
 
     # 1) 强校验：所有 feature_columns 必须是数值型
     non_numeric_cols = (
-        features_df[feature_columns]
-        .select_dtypes(exclude=[np.number])
-        .columns
-        .tolist()
+        features_df[feature_columns].select_dtypes(exclude=[np.number]).columns.tolist()
     )
     if non_numeric_cols:
         raise ValueError(f"Non-numeric columns in feature_columns: {non_numeric_cols}")
@@ -1290,9 +1351,7 @@ def build_and_save_features(
     # 3) 对所有 feature_columns 做组内前向填充 + 余下补0
     #    这样才能保证 x_seq 真正无 NaN
     features_df[feature_columns] = (
-        features_df.groupby("ts_code", sort=False)[feature_columns]
-        .ffill()
-        .fillna(0.0)
+        features_df.groupby("ts_code", sort=False)[feature_columns].ffill().fillna(0.0)
     )
 
     # 4) 生成 mask 列
@@ -1300,16 +1359,22 @@ def build_and_save_features(
     features_df = pd.concat([features_df, mask_df], axis=1)
 
     # 5) 最终硬校验：不允许 feature_columns 里残留 NaN
-    remaining_nan_cols = features_df[feature_columns].columns[
-        features_df[feature_columns].isna().any()
-    ].tolist()
+    remaining_nan_cols = (
+        features_df[feature_columns]
+        .columns[features_df[feature_columns].isna().any()]
+        .tolist()
+    )
     if remaining_nan_cols:
-        raise ValueError(f"NaN still exists in feature_columns after fill: {remaining_nan_cols}")
+        raise ValueError(
+            f"NaN still exists in feature_columns after fill: {remaining_nan_cols}"
+        )
 
     features_df = optimize_df(features_df)
 
     features_path = features_dir / f"{dataset_name}_features.parquet"
-    features_df.to_parquet(features_path, index=False, engine="pyarrow", compression="snappy")
+    features_df.to_parquet(
+        features_path, index=False, engine="pyarrow", compression="snappy"
+    )
     return features_path
 
 
@@ -1324,7 +1389,7 @@ def generate_sample_anchor_calendar(
     max_anchor_position = len(trading_calendar) - label_horizon
     if max_anchor_position <= sequence_length - 1:
         return pd.DatetimeIndex([], dtype="datetime64[ns]")
-    return trading_calendar[sequence_length - 1:max_anchor_position:start_interval]
+    return trading_calendar[sequence_length - 1 : max_anchor_position : start_interval]
 
 
 def generate_split_anchor_calendars(
@@ -1366,7 +1431,7 @@ def generate_split_anchor_calendars(
             anchor_split_map[pd.Timestamp(anchor_date).normalize()] = split_name
 
     return split_anchor_calendars, anchor_split_map
-    
+
 
 def build_datasets(
     config: DatasetBuilderConfig,
@@ -1374,13 +1439,17 @@ def build_datasets(
     multiprocess: bool = True,
     num_workers: int | None = None,
 ) -> DatasetBuildResult:
+    label_column = config.label_column
+    if label_column is None:
+        raise ValueError("label_column must be resolved before build_datasets.")
+
     logger.info(
         "Starting dataset build",
         dataset_name=config.dataset_name,
         splits={k: len(v) for k, v in config.splits.as_dict().items()},
         sequence_length=config.sequence.sequence_length,
         target_horizons=config.sequence.target_horizons,
-        label_column=config.label_column,
+        label_column=label_column,
         split_on=config.split_on,
         universe_filter_mode=config.universe_filter_mode,
         start_interval_by_split=config.start_interval_by_split(),
@@ -1388,11 +1457,17 @@ def build_datasets(
     processed_df, persisted_config = load_processed_panel(config.processed)
     _log_columns_once("load_processed_panel", None, list(processed_df.columns))
     target_columns = persisted_config["artifact_signature"]["target_columns"]
-    cross_sectional_target_columns = persisted_config["artifact_signature"]["cross_sectional_target_columns"]
+    cross_sectional_target_columns = persisted_config["artifact_signature"][
+        "cross_sectional_target_columns"
+    ]
     all_target_columns = target_columns + cross_sectional_target_columns
-    raw_feature_columns = select_lstm_feature_columns(processed_df, target_columns=all_target_columns)
+    raw_feature_columns = select_lstm_feature_columns(
+        processed_df, target_columns=all_target_columns
+    )
     feature_columns = filter_derived_zscore_feature_columns(raw_feature_columns)
-    _log_columns_once("select_lstm_feature_columns", list(processed_df.columns), list(feature_columns))
+    _log_columns_once(
+        "select_lstm_feature_columns", list(processed_df.columns), list(feature_columns)
+    )
     if not feature_columns:
         raise ValueError("No LSTM feature columns were selected from processed_df.")
 
@@ -1413,14 +1488,15 @@ def build_datasets(
     feature_specs = persisted_config["artifact_signature"]["feature_specs"]
 
     preprocess_feature_columns = [
-        c for c in select_scaler_feature_columns(feature_specs)
-        if c in feature_columns
+        c for c in select_scaler_feature_columns(feature_specs) if c in feature_columns
     ]
-    normalized_processed_df, bounded_features, ratio_features, normal_features = preprocess_model_features(
-        processed_df=processed_df,
-        feature_columns=preprocess_feature_columns,
-        window=_ROLLING_NORMALIZATION_WINDOW,
-        min_periods=_ROLLING_NORMALIZATION_MIN_PERIODS,
+    normalized_processed_df, bounded_features, ratio_features, normal_features = (
+        preprocess_model_features(
+            processed_df=processed_df,
+            feature_columns=preprocess_feature_columns,
+            window=_ROLLING_NORMALIZATION_WINDOW,
+            min_periods=_ROLLING_NORMALIZATION_MIN_PERIODS,
+        )
     )
     logger.info(
         "Resolved feature groups",
@@ -1449,13 +1525,17 @@ def build_datasets(
         "date",
         "in_csi300",
         *all_target_columns,
-        *cross_sectional_columns
+        *cross_sectional_columns,
     ]
     metadata_columns = list(dict.fromkeys(metadata_columns))
 
     metadata_source_df = processed_df.loc[:, metadata_columns].copy()
-    metadata_source_df["date"] = pd.to_datetime(metadata_source_df["date"]).dt.normalize()
-    metadata_source_df = metadata_source_df.sort_values(["ts_code", "date"], ignore_index=True)
+    metadata_source_df["date"] = pd.to_datetime(
+        metadata_source_df["date"]
+    ).dt.normalize()
+    metadata_source_df = metadata_source_df.sort_values(
+        ["ts_code", "date"], ignore_index=True
+    )
     if normal_features:
         metadata_source_df = truncate_grouped_warmup_rows(
             metadata_source_df,
@@ -1468,7 +1548,7 @@ def build_datasets(
         sequence_config=config.sequence,
         trading_calendar=trading_calendar,
         target_columns=all_target_columns,
-        label_column=config.label_column,
+        label_column=label_column,
         split_config=config.splits,
         split_on=config.split_on,
         universe_filter_mode=config.universe_filter_mode,
@@ -1485,7 +1565,7 @@ def build_datasets(
         processed_path=config.processed.processed_path,
         processed_config_path=config.processed.config_path,
         dataset_paths=dataset_paths,
-        feature_columns=raw_feature_columns,
+        feature_columns=feature_columns,
         target_columns=all_target_columns,
         cross_sectional_columns=select_cross_sectional_feature_columns(feature_specs),
         sample_counts=sample_counts,
@@ -1494,18 +1574,24 @@ def build_datasets(
     # save result to a json file for easy loading in training script
     result_path = config.dataset_dir / f"{config.dataset_name}_build_result.json"
     with result_path.open("w", encoding="utf-8") as fh:
-        json.dump({
-            "processed_path": str(result.processed_path),
-            "processed_config_path": str(result.processed_config_path),
-            "dataset_paths": {k: str(v) for k, v in result.dataset_paths.items()},
-            "feature_columns": result.feature_columns,
-            "target_columns": result.target_columns,
-            "cross_sectional_columns": result.cross_sectional_columns,
-            "sample_counts": result.sample_counts,
-            "split_on": config.split_on,
-            "universe_filter_mode": config.universe_filter_mode,
-            "start_interval_by_split": config.start_interval_by_split(),
-        }, fh, ensure_ascii=True, indent=2, sort_keys=True)
+        json.dump(
+            {
+                "processed_path": str(result.processed_path),
+                "processed_config_path": str(result.processed_config_path),
+                "dataset_paths": {k: str(v) for k, v in result.dataset_paths.items()},
+                "feature_columns": result.feature_columns,
+                "target_columns": result.target_columns,
+                "cross_sectional_columns": result.cross_sectional_columns,
+                "sample_counts": result.sample_counts,
+                "split_on": config.split_on,
+                "universe_filter_mode": config.universe_filter_mode,
+                "start_interval_by_split": config.start_interval_by_split(),
+            },
+            fh,
+            ensure_ascii=True,
+            indent=2,
+            sort_keys=True,
+        )
     logger.info(
         "Dataset build completed",
         dataset_name=config.dataset_name,

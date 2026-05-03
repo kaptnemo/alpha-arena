@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
 import pytest
 
@@ -110,10 +109,12 @@ def test_build_processed_panel_saves_processed_parquet_and_config(
 
     processed_df, persisted_config = load_processed_panel(processed_config)
     assert "y_ret_1" in processed_df.columns
-    assert persisted_config["artifact_signature"] == processed_config.artifact_signature()
-    assert json.loads(result.config_path.read_text(encoding="utf-8"))["build_options"] == (
-        processed_config.build_options()
+    assert (
+        persisted_config["artifact_signature"] == processed_config.artifact_signature()
     )
+    assert json.loads(result.config_path.read_text(encoding="utf-8"))[
+        "build_options"
+    ] == (processed_config.build_options())
 
 
 def test_build_datasets_reads_processed_artifact_without_cross_split_leakage(
@@ -150,34 +151,38 @@ def test_build_datasets_reads_processed_artifact_without_cross_split_leakage(
     assert "y_ret_1" in processed_df.columns
     assert result.feature_columns
 
-    for split_name, split_year in {"train": 2022, "evaluate": 2023, "test": 2024}.items():
-        dataset_paths = result.dataset_paths[split_name]
-        assert dataset_paths.features_path.exists()
-        assert dataset_paths.metadata_path.exists()
-        features_df = pd.read_parquet(dataset_paths.features_path)
-        metadata_df = pd.read_parquet(dataset_paths.metadata_path)
+    for split_name, split_year in {
+        "train": 2022,
+        "evaluate": 2023,
+        "test": 2024,
+    }.items():
+        metadata_path = result.dataset_paths[split_name]
+        features_path = result.dataset_paths["features"]
+        assert features_path.exists()
+        assert metadata_path.exists()
+        features_df = pd.read_parquet(features_path)
+        metadata_df = pd.read_parquet(metadata_path)
         assert not features_df.empty
         assert not metadata_df.empty
         assert len(metadata_df) == result.sample_counts[split_name]
-        assert metadata_df["split"].eq(split_name).all()
         assert metadata_df["sequence_start_date"].dt.year.eq(split_year).all()
         assert metadata_df["sequence_end_date"].dt.year.eq(split_year).all()
         assert metadata_df["label_date"].dt.year.eq(split_year).all()
-        assert metadata_df["mask_ret_1"].eq(1.0).all()
-        assert {"sample_id", "ts_code", "start_idx", "end_idx", "y_ret_1", "mask_ret_1"} <= set(
-            metadata_df.columns
-        )
-        assert features_df["sample_id"].isin(metadata_df["sample_id"]).all()
-        assert features_df["date"].dt.year.eq(split_year).all()
+        assert metadata_df["ret_1_mask"].eq(1.0).all()
+        assert {
+            "sample_id",
+            "ts_code",
+            "start_idx",
+            "end_idx",
+            "y_ret_1",
+            "ret_1_mask",
+        } <= set(metadata_df.columns)
+        assert {"ts_code", "date", *result.feature_columns} <= set(features_df.columns)
 
-        sample_lengths = features_df.groupby("sample_id")["sequence_position"].agg(["count", "max"])
-        assert sample_lengths["count"].eq(config.sequence.sequence_length).all()
-        assert sample_lengths["max"].eq(config.sequence.sequence_length - 1).all()
-
-    train_dataset_df = pd.read_parquet(result.dataset_paths["train"].features_path)
+    train_dataset_df = pd.read_parquet(result.dataset_paths["features"])
     assert not train_dataset_df[result.feature_columns].isna().any().any()
-    evaluate_dataset_df = pd.read_parquet(result.dataset_paths["evaluate"].features_path)
-    test_dataset_df = pd.read_parquet(result.dataset_paths["test"].features_path)
+    evaluate_dataset_df = pd.read_parquet(result.dataset_paths["features"])
+    test_dataset_df = pd.read_parquet(result.dataset_paths["features"])
     assert not evaluate_dataset_df[result.feature_columns].isna().any().any()
     assert not test_dataset_df[result.feature_columns].isna().any().any()
 
@@ -186,7 +191,9 @@ def test_build_datasets_rejects_processed_config_mismatch(tmp_path: Path) -> Non
     raw_path = tmp_path / "raw_panel.parquet"
     _make_raw_panel().to_parquet(raw_path, index=False)
 
-    saved_processed_config = _make_processed_config(raw_path=raw_path, tmp_path=tmp_path)
+    saved_processed_config = _make_processed_config(
+        raw_path=raw_path, tmp_path=tmp_path
+    )
     build_processed_panel(saved_processed_config)
     mismatched_processed_config = _make_processed_config(
         raw_path=raw_path,

@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import Any, Optional
+from typing import Any
 
 import torch
 from torch import Tensor, nn
@@ -12,7 +12,14 @@ PredictOutput = dict[str, Any]
 
 
 class BaseAlphaModel(nn.Module, ABC):
-    required_batch_keys: tuple[str, ...] = ("x_seq", "x_cs", "x_cs_mask", "y_return", "y_risk", "label_date")
+    required_batch_keys: tuple[str, ...] = (
+        "x_seq",
+        "x_cs",
+        "x_cs_mask",
+        "y_return",
+        "y_risk",
+        "label_date",
+    )
     required_forward_keys: tuple[str, ...] = ("pred_return", "pred_var")
     required_loss_keys: tuple[str, ...] = ("loss",)
     required_predict_keys: tuple[str, ...] = ("pred",)
@@ -28,7 +35,7 @@ class BaseAlphaModel(nn.Module, ABC):
     def compute_loss(
         self,
         batch: Batch,
-        outputs: Optional[ModelOutput] = None,
+        outputs: ModelOutput | None = None,
         **kwargs,
     ) -> LossOutput:
         if self.enable_validation:
@@ -107,7 +114,9 @@ class BaseAlphaModel(nn.Module, ABC):
             raise TypeError(f"loss_dict['loss'] must be Tensor, got {type(loss)}")
 
         if loss.ndim != 0:
-            raise ValueError(f"loss_dict['loss'] must be scalar, got {tuple(loss.shape)}")
+            raise ValueError(
+                f"loss_dict['loss'] must be scalar, got {tuple(loss.shape)}"
+            )
 
         if not torch.isfinite(loss):
             raise ValueError("loss_dict['loss'] contains NaN or Inf")

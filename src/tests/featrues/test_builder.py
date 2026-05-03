@@ -60,8 +60,10 @@ def test_build_panel_features_multiprocess_matches_single_process() -> None:
         clip_return=0.2,
     )
 
-    panel_feat_single = build_panel_features(test_df, cfg)
-    panel_feat_mp = build_panel_features_multiprocess(test_df, cfg, num_workers=2)
+    panel_feat_single, single_specs = build_panel_features(test_df, cfg)
+    panel_feat_mp, mp_specs = build_panel_features_multiprocess(
+        test_df, cfg, num_workers=2
+    )
 
     assert_frame_equal(
         panel_feat_single,
@@ -71,3 +73,4 @@ def test_build_panel_features_multiprocess_matches_single_process() -> None:
         atol=1e-6,
         rtol=1e-7,
     )
+    assert single_specs == mp_specs

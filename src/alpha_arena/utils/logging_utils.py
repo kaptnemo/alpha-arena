@@ -2,7 +2,7 @@ import logging
 import sys
 from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
-from typing import Optional
+from typing import Any
 
 import structlog
 
@@ -10,7 +10,7 @@ _IS_CONFIGURED = False
 
 
 def configure_logging(
-    log_dir: Optional[Path] = None,
+    log_dir: Path | None = None,
     file_name: str = "alpha_arena.log",
     level: int = logging.INFO,
 ) -> None:
@@ -24,7 +24,7 @@ def configure_logging(
     resolved_log_dir.mkdir(parents=True, exist_ok=True)
 
     timestamper = structlog.processors.TimeStamper(fmt="iso", utc=False)
-    shared_processors = [
+    shared_processors: list[Any] = [
         structlog.contextvars.merge_contextvars,
         structlog.stdlib.add_log_level,
         timestamper,
