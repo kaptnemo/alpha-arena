@@ -10,8 +10,11 @@ from alpha_arena.train.dataset.builder import (
     DatasetYearSplitConfig,
     ProcessedPanelConfig,
     SequenceSliceConfig,
+    apply_grouped_rolling_normalization,
     build_datasets,
     build_processed_panel,
+    classify_preprocess_feature_columns,
+    filter_derived_zscore_feature_columns,
     generate_split_anchor_calendars,
 )
 
@@ -92,20 +95,10 @@ def _make_cross_year_raw_panel() -> pd.DataFrame:
 
 
 def _make_universe_filter_panel() -> pd.DataFrame:
-    dates = pd.DatetimeIndex(
-        pd.to_datetime(
-            [
-                "2024-01-02",
-                "2024-01-03",
-                "2024-01-04",
-                "2024-01-05",
-                "2024-01-08",
-                "2024-01-09",
-            ]
-        )
-    )
+    dates = pd.date_range("2024-01-02", periods=70, freq="B")
     rows: list[dict[str, object]] = []
-    in_csi300 = [False, False, True, True, True, True]
+    in_csi300 = [True] * len(dates)
+    in_csi300[60] = False
     for symbol_idx, ts_code in enumerate(["000001.SZ", "000002.SZ"]):
         prev_close = 10.0 + symbol_idx
         for date_idx, (date, in_universe) in enumerate(zip(dates, in_csi300, strict=True)):
@@ -208,16 +201,7 @@ def test_build_datasets_supports_anchor_date_universe_filter_and_anchor_metadata
             universe_filter_mode="anchor_date",
         ),
         trade_calendar_provider=lambda *_args: pd.DatetimeIndex(
-            pd.to_datetime(
-                [
-                    "2024-01-02",
-                    "2024-01-03",
-                    "2024-01-04",
-                    "2024-01-05",
-                    "2024-01-08",
-                    "2024-01-09",
-                ]
-            )
+            pd.date_range("2024-01-02", periods=70, freq="B")
         ),
         multiprocess=False,
     )
@@ -228,27 +212,68 @@ def test_build_datasets_supports_anchor_date_universe_filter_and_anchor_metadata
             **{k: v for k, v in base_kwargs.items() if k != "dataset_name"},
         ),
         trade_calendar_provider=lambda *_args: pd.DatetimeIndex(
-            pd.to_datetime(
-                [
-                    "2024-01-02",
-                    "2024-01-03",
-                    "2024-01-04",
-                    "2024-01-05",
-                    "2024-01-08",
-                    "2024-01-09",
-                ]
-            )
+            pd.date_range("2024-01-02", periods=70, freq="B")
         ),
         multiprocess=False,
     )
 
-    assert anchor_mode_result.sample_counts["train"] == 6
-    assert full_window_result.sample_counts["train"] == 2
+    assert anchor_mode_result.sample_counts["train"] == 132
+    assert full_window_result.sample_counts["train"] == 128
+    assert all(not column.endswith("_z2") for column in anchor_mode_result.feature_columns)
 
     anchor_metadata = pd.read_parquet(anchor_mode_result.dataset_paths["train"])
     assert "anchor_date" in anchor_metadata.columns
-    assert sorted(anchor_metadata["anchor_date"].dt.strftime("%Y-%m-%d").unique().tolist()) == [
-        "2024-01-04",
-        "2024-01-05",
-        "2024-01-08",
-    ]
+    anchor_dates = sorted(anchor_metadata["anchor_date"].dt.strftime("%Y-%m-%d").unique().tolist())
+    assert anchor_dates[0] == "2024-01-04"
+    assert anchor_dates[-1] == "2024-04-05"
+    assert "2024-03-26" not in anchor_dates
+
+
+def test_apply_grouped_rolling_normalization_uses_per_symbol_history() -> None:
+    dates = pd.date_range("2024-01-02", periods=70, freq="B")
+    df = pd.DataFrame(
+        {
+            "ts_code": ["000001.SZ"] * len(dates) + ["000002.SZ"] * len(dates),
+            "date": list(dates) * 2,
+            "feature_a": list(range(70)) + list(range(100, 170)),
+        }
+    )
+
+    result = apply_grouped_rolling_normalization(
+        df,
+        feature_columns=["feature_a"],
+        window=252,
+        min_periods=60,
+    )
+
+    first_symbol = result[result["ts_code"] == "000001.SZ"].reset_index(drop=True)
+    assert not first_symbol["feature_a"].isna().any()
+    assert first_symbol["date"].iloc[0] == dates[60]
+
+    window_values = pd.Series(range(60), dtype="float64")
+    expected_day_60 = (60.0 - window_values.mean()) / window_values.std(ddof=0)
+    assert abs(first_symbol.loc[0, "feature_a"] - expected_day_60) < 1e-6
+
+    second_symbol = result[result["ts_code"] == "000002.SZ"].reset_index(drop=True)
+    assert len(first_symbol) == len(dates) - 60
+    assert first_symbol.loc[0, "feature_a"] == second_symbol.loc[0, "feature_a"]
+
+
+def test_feature_preprocess_groups_drop_derived_zscores() -> None:
+    filtered = filter_derived_zscore_feature_columns(
+        [
+            "ret_1",
+            "ret_1_z10",
+            "ma_ratio_5",
+            "rsi_14",
+            "bb_pos",
+            "obv",
+            "macd_hist_z20",
+        ]
+    )
+    assert filtered == ["ret_1", "ma_ratio_5", "rsi_14", "bb_pos", "obv"]
+
+    bounded_features, ratio_features, normal_features = classify_preprocess_feature_columns(filtered)
+    assert bounded_features == ["rsi_14", "bb_pos"]
+    assert ratio_features == ["ret_1", "ma_ratio_5"]
+    assert normal_features == ["obv"]

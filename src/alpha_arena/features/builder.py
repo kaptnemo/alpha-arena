@@ -219,7 +219,7 @@ def build_features_for_one_symbol(g: pd.DataFrame, cfg: FeatureConfig) -> tuple[
     if missing_in_df:
         raise ValueError(f"Schema columns missing in DataFrame: {missing_in_df}")
     if extra_in_df:
-        logger.warning(f"DataFrame contains columns not in schema: {extra_in_df}")
+        logger.debug(f"DataFrame contains columns not in schema: {extra_in_df}")
 
     return g, collector.to_list()
 

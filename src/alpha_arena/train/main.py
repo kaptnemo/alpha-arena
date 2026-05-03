@@ -186,17 +186,17 @@ def main():
 
     # 加载数据集
     dataset_name = "csi300_2017_2025_seq60_step5_targets_5_10_20_label_y_ret_5"
-    train_dataset = SequenceDataset(dataset_name=dataset_name, split_name="train")
-    valid_dataset = SequenceDataset(dataset_name=dataset_name, split_name="evaluate")
+    train_dataset = SequenceDataset(dataset_name=dataset_name, split_name="train", y_return_col="y_ret_5_cs_z")
+    valid_dataset = SequenceDataset(dataset_name=dataset_name, split_name="evaluate", y_return_col="y_ret_5_cs_z")
 
     dataloaders = create_dataloader(train_dataset, valid_dataset, batch_size=512)
     train_grouped_loader = dataloaders["train_grouped_loader"]
     train_random_loader = dataloaders["train_random_loader"]
     valid_loader = dataloaders["valid_loader"]
 
-    num_epochs = 80
+    num_epochs = 100
     mid_epochs = 20 
-    warmup_epochs = 10
+    warmup_epochs = 15
 
     # 训练模型
     result = train_model_ddp(
@@ -213,13 +213,14 @@ def main():
         warmup_alpha_rank=0.0,
         mid_alpha_rank=0.02,
         main_alpha_rank=0.05,
-        warmup_alpha_mse=50.0,
-        mid_alpha_mse=20.0,
-        main_alpha_mse=10.0,
+        warmup_alpha_mse=2.0,
+        mid_alpha_mse=1.0,
+        main_alpha_mse=0.5,
         warmup_lr=1e-3,
         mid_lr=3e-4,
         main_lr=1e-4,
-        patience=20,
+        patience=30,
+        loss_type="gaussian_nll"
     )
 
     print("Training completed. Final results:", result)

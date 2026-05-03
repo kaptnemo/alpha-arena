@@ -175,23 +175,11 @@ def test_build_datasets_reads_processed_artifact_without_cross_split_leakage(
         assert sample_lengths["max"].eq(config.sequence.sequence_length - 1).all()
 
     train_dataset_df = pd.read_parquet(result.dataset_paths["train"].features_path)
-    assert np.allclose(
-        train_dataset_df[result.feature_columns].to_numpy().mean(axis=0),
-        0.0,
-        atol=1e-6,
-    )
+    assert not train_dataset_df[result.feature_columns].isna().any().any()
     evaluate_dataset_df = pd.read_parquet(result.dataset_paths["evaluate"].features_path)
     test_dataset_df = pd.read_parquet(result.dataset_paths["test"].features_path)
-    assert not np.allclose(
-        evaluate_dataset_df[result.feature_columns].to_numpy().mean(axis=0),
-        0.0,
-        atol=1e-3,
-    )
-    assert not np.allclose(
-        test_dataset_df[result.feature_columns].to_numpy().mean(axis=0),
-        0.0,
-        atol=1e-3,
-    )
+    assert not evaluate_dataset_df[result.feature_columns].isna().any().any()
+    assert not test_dataset_df[result.feature_columns].isna().any().any()
 
 
 def test_build_datasets_rejects_processed_config_mismatch(tmp_path: Path) -> None:

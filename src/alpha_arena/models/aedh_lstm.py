@@ -81,6 +81,17 @@ class MLPHead(nn.Module):
         return self.net(x)
 
 
+def check_tensor(name, x):
+    print(
+        name,
+        "shape=", x.shape,
+        "nan=", torch.isnan(x).any().item(),
+        "inf=", torch.isinf(x).any().item(),
+        "min=", torch.nan_to_num(x, nan=0.0).min().item(),
+        "max=", torch.nan_to_num(x, nan=0.0).max().item(),
+    )
+
+
 class AttentionEnhancedDualHeadLSTM(nn.Module):
     """
     Attention-Enhanced Dual-Head LSTM
@@ -203,6 +214,9 @@ class AttentionEnhancedDualHeadLSTM(nn.Module):
                 "features": [B, D],
             }
         """
+        # check_tensor("x_seq", x_seq)
+        # check_tensor("x_cs", x_cs)
+        # check_tensor("x_cs_mask", x_cs_mask)
         x = self.input_proj(x_seq)                 # [B, T, F]
         lstm_out, _ = self.lstm(x)             # [B, T, H]
 
@@ -305,8 +319,161 @@ class AttentionEnhancedDualHeadLSTM(nn.Module):
 
         return -corr
 
+    @staticmethod
+    def grouped_rank_ic_loss(
+        pred: torch.Tensor,
+        target: torch.Tensor,
+        date_id: torch.Tensor,
+        mask: torch.Tensor | None = None,
+        eps: float = 1e-8,
+    ) -> torch.Tensor:
+        if pred.ndim > 1:
+            pred = pred.squeeze(-1)
+        if target.ndim > 1:
+            target = target.squeeze(-1)
+
+        if mask is None:
+            mask = torch.ones_like(target, dtype=torch.bool)
+        else:
+            mask = mask.bool()
+
+        losses = []
+
+        for d in torch.unique(date_id):
+            m = (date_id == d) & mask
+            if m.sum() < 2:
+                continue
+
+            x = pred[m]
+            y = target[m]
+
+            x = x - x.mean()
+            y = y - y.mean()
+
+            x_var = (x * x).mean()
+            y_var = (y * y).mean()
+
+            if x_var.detach() < eps or y_var.detach() < eps:
+                continue
+
+            corr = (x * y).mean() / torch.sqrt(x_var * y_var + eps)
+            losses.append(-corr)
+
+        if not losses:
+            return pred.new_zeros(())
+
+        return torch.stack(losses).mean()
+
 
     def compute_loss(
+        self,
+        batch: dict,
+        outputs: dict[str, torch.Tensor],
+        loss_type: str = "mse",
+        alpha_rank: float = 0.1,
+        alpha_mse: float = 0.0,
+        var_min: float = 1e-4,
+    ) -> dict[str, torch.Tensor]:
+
+        pred_return = outputs["pred_return"]
+        target_return = batch["y_return"]
+        pred_var = outputs["pred_var"]
+
+        pred_var_clamped = torch.clamp(pred_var, min=var_min)
+
+        # check_tensor("pred_return", pred_return)
+        # check_tensor("target_return", target_return)
+        # check_tensor("pred_var_raw", pred_var)
+        # check_tensor("pred_var_clamped", pred_var_clamped)
+
+        pred_return = torch.nan_to_num(pred_return, nan=0.0, posinf=1e4, neginf=-1e4)
+        target_return = torch.nan_to_num(target_return, nan=0.0, posinf=1e4, neginf=-1e4)
+        pred_var = torch.nan_to_num(pred_var, nan=1.0, posinf=10.0, neginf=var_min)
+
+        if pred_return.ndim > 1:
+            pred_return = pred_return.squeeze(-1)
+        if target_return.ndim > 1:
+            target_return = target_return.squeeze(-1)
+
+        target_mask = batch.get("target_mask")
+        if target_mask is not None:
+            target_mask = target_mask.bool()
+
+        # =====================
+        # MSE base loss
+        # =====================
+        mse_loss = self.mse_loss(pred_return, target_return, reduction="mean")
+
+        # =====================
+        # Optional NLL
+        # =====================
+        if loss_type == "gaussian_nll":
+            nll_loss = F.gaussian_nll_loss(
+                input=pred_return,
+                target=target_return,
+                var=pred_var_clamped,
+                full=False,
+                reduction="mean"
+            )
+            base_loss = nll_loss
+
+        elif loss_type == "mse":
+            nll_loss = pred_return.new_zeros(())
+            base_loss = mse_loss
+
+        else:
+            raise ValueError(f"Unsupported loss_type: {loss_type}")
+
+        # =====================
+        # RankIC loss: 必须按 date_id 分组
+        # =====================
+        # 注意：如果 batch 本身就是单日横截面，则 date_id 可以为 None，此时直接在整个 batch 上计算 rank_ic_loss。
+        date_id = batch.get("date_id")
+
+        if alpha_rank > 0:
+            if date_id is None:
+                # 只有当 batch 本身保证是单日横截面时才允许这样算
+                rank_loss = self.rank_ic_loss(
+                    pred_return,
+                    target_return,
+                )
+            else:
+                rank_loss = self.grouped_rank_ic_loss(
+                    pred_return,
+                    target_return,
+                    date_id=date_id,
+                )
+        else:
+            rank_loss = pred_return.new_zeros(())
+
+        total_loss = base_loss + alpha_mse * mse_loss + alpha_rank * rank_loss
+
+        if pred_var is not None:
+            pred_var_mean = pred_var.mean().detach()
+            pred_var_min = pred_var.min().detach()
+            pred_var_max = pred_var.max().detach()
+            pred_std_mean = torch.sqrt(pred_var).mean().detach()
+        else:
+            pred_var_mean = pred_return.new_zeros(())
+            pred_var_min = pred_return.new_zeros(())
+            pred_var_max = pred_return.new_zeros(())
+            pred_std_mean = pred_return.new_zeros(())
+
+        return {
+            "loss": total_loss,
+            "base_loss": base_loss.detach(),
+            "nll_loss": nll_loss.detach(),
+            "mse_loss": mse_loss.detach(),
+            "rank_loss": rank_loss.detach(),
+            "pred_var_mean": pred_var_mean,
+            "pred_var_min": pred_var_min,
+            "pred_var_max": pred_var_max,
+            "pred_std_mean": pred_std_mean,
+            "pred_return_mean": pred_return.mean().detach(),
+            "pred_return_std": pred_return.std(unbiased=False).detach(),
+        }
+
+    def compute_loss_legacy(
         self,
         outputs: Dict[str, torch.Tensor],
         target_return: torch.Tensor,

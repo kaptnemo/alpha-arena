@@ -323,7 +323,8 @@ if __name__ == "__main__":
     # dist.init_process_group(backend="nccl")
     dataset = SequenceDataset(
         dataset_name="csi300_2017_2025_seq60_step5_targets_5_10_20_label_y_ret_5",
-        split_name="test",
+        split_name="evaluate",
+        y_return_col="y_ret_5_cs_z",
     )
 
     for i in range(20):
@@ -368,6 +369,7 @@ if __name__ == "__main__":
         label_date = batch["label_date"][0]
         print(f"Batch size: {batch_size}, Label date: {label_date}")
         assert all(date == label_date for date in batch["label_date"]), "All label_dates in the batch should be the same"
+        assert all(~batch['y_return'].isnan()), "All y_return values in the batch should be non-None"
 
     # for batch in grouped_dataloader:
     #     print(batch)

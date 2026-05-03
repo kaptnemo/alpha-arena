@@ -14,7 +14,6 @@ import pyarrow.parquet as pq
 
 import numpy as np
 import pandas as pd
-from sklearn.preprocessing import StandardScaler
 
 from alpha_arena.data import (
     DATASET_DATA_DIR,
@@ -37,6 +36,38 @@ logger = get_logger(__name__)
 _RAW_COLS = frozenset({"ts_code", "date", "open", "high", "low", "close", "volume"})
 _VALID_SPLIT_ON = frozenset({"end_date", "label_date"})
 _VALID_UNIVERSE_FILTER_MODES = frozenset({"full_window", "anchor_date", "label_date"})
+_ROLLING_NORMALIZATION_WINDOW = 252
+_ROLLING_NORMALIZATION_MIN_PERIODS = 60
+_ZSCORE_FEATURE_SUFFIX_RE = re.compile(r"_z\d+$")
+_RATIO_FEATURE_PREFIXES = (
+    "ret_",
+    "log_ret_",
+    "oc_ratio",
+    "hl_ratio",
+    "co_gap",
+    "ma_ratio_",
+    "volume_ma_ratio_",
+    "volatility_",
+    "sharpe_like_",
+    "sortino_like_",
+    "roc_",
+    "atr_",
+    "natr_",
+    "bb_width",
+)
+_BOUNDED_FEATURE_RANGES = (
+    ("rsi_", (0.0, 100.0)),
+    ("adx_", (0.0, 100.0)),
+    ("mfi_", (0.0, 100.0)),
+    ("stoch_k_", (0.0, 100.0)),
+    ("stoch_d_", (0.0, 100.0)),
+    ("price_pos_", (0.0, 1.0)),
+    ("bb_pos", (0.0, 1.0)),
+    ("cmf_", (-1.0, 1.0)),
+    ("willr_", (-100.0, 0.0)),
+    ("drawdown_", (-1.0, 0.0)),
+    ("er_", (0.0, 1.0)),
+)
 
 # Tracks which steps have already been logged in this process.
 # In multiprocessing, each worker gets its own copy, so each process logs only once.
@@ -129,6 +160,7 @@ class ProcessedPanelConfig:
     num_workers: int | None = None
     # 以下字段不接受外部传入，而是由 build_processed_panel 内部根据计算结果填充，供后续 dataset 构建使用
     target_columns: list[str] = field(default_factory=list)
+    cross_sectional_target_columns: list[str] = field(default_factory=list)
     feature_specs: list[FeatureSpec] = field(default_factory=list)
 
     def __post_init__(self) -> None:
@@ -138,6 +170,8 @@ class ProcessedPanelConfig:
         )
         if self.target_columns:
             raise ValueError("target_columns should not be set in ProcessedPanelConfig; it is determined by target_horizons.")
+        if self.cross_sectional_target_columns:
+            raise ValueError("cross_sectional_target_columns should not be set in ProcessedPanelConfig; it is determined by target_horizons.")
         if self.feature_specs:
             raise ValueError("feature_specs should not be set in ProcessedPanelConfig; it is determined by the features built in build_processed_panel.")
         if not self.target_horizons:
@@ -164,6 +198,7 @@ class ProcessedPanelConfig:
             "feature_config": _to_json_compatible(asdict(self.feature_config)),
             "target_horizons": list(self.target_horizons),
             "target_columns": self.target_columns,
+            "cross_sectional_target_columns": self.cross_sectional_target_columns,
             "feature_specs": [asdict(spec) for spec in self.feature_specs],
         }
 
@@ -254,7 +289,7 @@ class DatasetSplitArgs:
 class DatasetStreamingWriteArgs:
     dataset_dir: Path
     dataset_name: str
-    scaler: StandardScaler
+    normalization: dict[str, int] | None
     dataset_split_args: DatasetSplitArgs
 
 
@@ -448,14 +483,51 @@ def select_cross_sectional_feature_columns(feature_specs: Sequence[FeatureSpec |
 
 
 def select_scaler_feature_columns(feature_specs: Sequence[FeatureSpec | dict]) -> list[str]:
-    """只选择需要参与 StandardScaler 的连续数值特征。"""
+    """选择需要参与预处理的连续数值特征，排除原始列和派生 z-score 列。"""
     scaler_feature_columns = []
     for spec in feature_specs:
         kind = spec['kind'] if isinstance(spec, dict) else spec.kind
         name = spec['name'] if isinstance(spec, dict) else spec.name
-        if kind == "numeric" and name not in _RAW_COLS:
+        if (
+            kind == "numeric"
+            and name not in _RAW_COLS
+            and not _ZSCORE_FEATURE_SUFFIX_RE.search(name)
+        ):
             scaler_feature_columns.append(name)
     return scaler_feature_columns
+
+
+def filter_derived_zscore_feature_columns(feature_columns: Sequence[str]) -> list[str]:
+    return [name for name in feature_columns if not _ZSCORE_FEATURE_SUFFIX_RE.search(name)]
+
+
+def _bounded_feature_range(name: str) -> tuple[float, float] | None:
+    for prefix, bounds in _BOUNDED_FEATURE_RANGES:
+        if name.startswith(prefix):
+            return bounds
+    if name.startswith("kdj_") and (name.endswith("_k") or name.endswith("_d")):
+        return (0.0, 100.0)
+    if name.startswith("supertrend_") and name.endswith("_dir"):
+        return (-1.0, 1.0)
+    return None
+
+
+def classify_preprocess_feature_columns(
+    feature_columns: Sequence[str],
+) -> tuple[list[str], list[str], list[str]]:
+    bounded_features: list[str] = []
+    ratio_features: list[str] = []
+    normal_features: list[str] = []
+
+    for name in feature_columns:
+        if _bounded_feature_range(name) is not None:
+            bounded_features.append(name)
+        elif any(name.startswith(prefix) for prefix in _RATIO_FEATURE_PREFIXES):
+            ratio_features.append(name)
+        else:
+            normal_features.append(name)
+
+    return bounded_features, ratio_features, normal_features
 
 
 def _subset_by_years(df: pd.DataFrame, years: Sequence[int]) -> pd.DataFrame:
@@ -466,27 +538,148 @@ def _subset_by_years(df: pd.DataFrame, years: Sequence[int]) -> pd.DataFrame:
     return df.loc[mask].copy()
 
 
-def fit_train_scaler(
-    processed_df: pd.DataFrame,
-    scaler_feature_columns: Sequence[str],
-    split_config: DatasetYearSplitConfig,
-) -> StandardScaler:
-    train_df = _subset_by_years(processed_df, split_config.train_years)
-    scaler_feature_columns = list(scaler_feature_columns)
+def truncate_grouped_warmup_rows(
+    df: pd.DataFrame,
+    *,
+    min_periods: int,
+) -> pd.DataFrame:
+    if df.empty:
+        return df.copy()
+    if min_periods <= 0:
+        raise ValueError(f"min_periods must be positive, got {min_periods}")
 
-    if train_df.empty:
-        raise ValueError("No training samples found in the processed DataFrame for the specified train_years.")
-    
-    missing_cols = [c for c in scaler_feature_columns if c not in train_df.columns]
+    truncated_df = df.copy()
+    row_position = truncated_df.groupby("ts_code", sort=False).cumcount()
+    truncated_df = truncated_df.loc[row_position >= min_periods].reset_index(drop=True)
+    return truncated_df
+
+
+def process_bounded_feature(name: str, x: pd.Series) -> pd.Series:
+    bounds = _bounded_feature_range(name)
+    if bounds is None:
+        raise ValueError(f"Unknown bounded feature: {name}")
+    lower, upper = bounds
+    scale = max((upper - lower) / 2.0, 1e-6)
+    center = (upper + lower) / 2.0
+    x = pd.to_numeric(x, errors="coerce").astype(np.float64).clip(lower=lower, upper=upper)
+    return ((x - center) / scale).clip(-1.0, 1.0)
+
+
+def process_ratio_feature(x: pd.Series) -> pd.Series:
+    x = pd.to_numeric(x, errors="coerce").astype(np.float64)
+    x = x.replace([np.inf, -np.inf], np.nan)
+    return np.sign(x) * np.log1p(np.abs(x))
+
+
+def final_sanitize_feature_frame(
+    df: pd.DataFrame,
+    feature_columns: Sequence[str],
+) -> pd.DataFrame:
+    feature_columns = list(feature_columns)
+    if not feature_columns or df.empty:
+        return optimize_df(df.copy())
+
+    sanitized_df = df.copy()
+    for column in feature_columns:
+        sanitized_df[column] = (
+            pd.to_numeric(sanitized_df[column], errors="coerce")
+            .replace([np.inf, -np.inf], np.nan)
+            .astype(np.float32)
+        )
+    return optimize_df(sanitized_df)
+
+
+def apply_grouped_rolling_normalization(
+    processed_df: pd.DataFrame,
+    feature_columns: Sequence[str],
+    window: int = _ROLLING_NORMALIZATION_WINDOW,
+    min_periods: int = _ROLLING_NORMALIZATION_MIN_PERIODS,
+) -> pd.DataFrame:
+    feature_columns = list(feature_columns)
+    if not feature_columns or processed_df.empty:
+        return processed_df.copy()
+    if window <= 0:
+        raise ValueError(f"window must be positive, got {window}")
+    if min_periods <= 0:
+        raise ValueError(f"min_periods must be positive, got {min_periods}")
+
+    missing_cols = [c for c in feature_columns if c not in processed_df.columns]
     if missing_cols:
         raise ValueError(
-            f"Scaler columns missing in processed_df: {missing_cols}"
+            f"Rolling normalization columns missing in processed_df: {missing_cols}"
         )
 
-    X_train = train_df.loc[:, scaler_feature_columns].to_numpy(dtype=np.float64, copy=False)
-    scaler = StandardScaler()
-    scaler.fit(X_train)
-    return scaler
+    normalized_df = processed_df.copy()
+    normalized_df["date"] = pd.to_datetime(normalized_df["date"]).dt.normalize()
+    normalized_df = normalized_df.sort_values(["ts_code", "date"], ignore_index=True)
+    normalized_df = normalized_df.astype({col: "float64" for col in feature_columns})
+
+    grouped = normalized_df.groupby("ts_code", sort=False)[feature_columns]
+    shifted = grouped.shift(1)
+
+    rolling_mean = (
+        shifted.groupby(normalized_df["ts_code"], sort=False)
+        .rolling(window=window, min_periods=min_periods)
+        .mean()
+        .reset_index(level=0, drop=True)
+    )
+
+    rolling_std = (
+        shifted.groupby(normalized_df["ts_code"], sort=False)
+        .rolling(window=window, min_periods=min_periods)
+        .std(ddof=0)
+        .reset_index(level=0, drop=True)
+        .replace(0.0, np.nan)
+    )
+
+    normalized_df.loc[:, feature_columns] = (
+        normalized_df.loc[:, feature_columns] - rolling_mean
+    ) / rolling_std
+    normalized_df = truncate_grouped_warmup_rows(
+        normalized_df,
+        min_periods=min_periods,
+    )
+    return normalized_df
+
+
+def preprocess_model_features(
+    processed_df: pd.DataFrame,
+    feature_columns: Sequence[str],
+    *,
+    window: int = _ROLLING_NORMALIZATION_WINDOW,
+    min_periods: int = _ROLLING_NORMALIZATION_MIN_PERIODS,
+) -> tuple[pd.DataFrame, list[str], list[str], list[str]]:
+    feature_columns = list(feature_columns)
+    if not feature_columns:
+        return processed_df.copy(), [], [], []
+
+    preprocessed_df = processed_df.copy()
+    preprocessed_df["date"] = pd.to_datetime(preprocessed_df["date"]).dt.normalize()
+    preprocessed_df = preprocessed_df.sort_values(["ts_code", "date"], ignore_index=True)
+    preprocessed_df = preprocessed_df.astype(
+        {col: "float64" for col in feature_columns if col in preprocessed_df.columns}
+    )
+
+    bounded_features, ratio_features, normal_features = classify_preprocess_feature_columns(
+        feature_columns
+    )
+
+    for name in bounded_features:
+        preprocessed_df.loc[:, name] = process_bounded_feature(name, preprocessed_df[name])
+
+    for name in ratio_features:
+        preprocessed_df.loc[:, name] = process_ratio_feature(preprocessed_df[name])
+
+    if normal_features:
+        preprocessed_df = apply_grouped_rolling_normalization(
+            processed_df=preprocessed_df,
+            feature_columns=normal_features,
+            window=window,
+            min_periods=min_periods,
+        )
+
+    preprocessed_df = final_sanitize_feature_frame(preprocessed_df, feature_columns)
+    return preprocessed_df, bounded_features, ratio_features, normal_features
 
 
 def _worker_get_dataset_metadata_task(
@@ -663,6 +856,73 @@ def optimize_df(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def add_cross_sectional_targets(
+    df: pd.DataFrame,
+    target_column_prefixes: Sequence[str],
+    date_col: str = "date",
+    universe_col: str = "in_csi300",
+    eps: float = 1e-6,
+) -> tuple[pd.DataFrame, list[str]]:
+    """
+    为 target 生成横截面标准化标签：
+
+    对每个 target_col 生成：
+    - {col}_cs_z       : 当日 CSI300 截面 z-score
+    - {col}_cs_z_mask  : z-score 是否有效
+    - {col}_cs_rank    : 当日 CSI300 截面 rank，范围 [-1, 1]
+    - {col}_cs_rank_mask : rank 是否有效
+
+    注意：
+    - 只使用 universe_col == True 的股票参与当日截面统计
+    - 非股票池内样本结果为 NaN，mask=0
+    - groupby 使用 date_col，通常应是 anchor_date / decision_date
+    """
+    target_columns = [
+        col for col in df.columns
+        if any(col.startswith(prefix) for prefix in target_column_prefixes)
+    ]
+
+    out = df.copy()
+    universe_mask = out[universe_col].astype(bool)
+
+    new_cols: dict[str, pd.Series] = {}
+    new_target_cols: list[str] = []
+
+    for col in target_columns:
+        base_mask = universe_mask & out[col].notna()
+        y = out[col].where(base_mask, np.nan)
+
+        grp = y.groupby(out[date_col], sort=False)
+
+        mean_ = grp.transform("mean")
+        std_ = grp.transform("std")
+        count_ = grp.transform("count")
+
+        # 1) z-score target
+        z_col = f"{col}_cs_z"
+
+        z_valid = base_mask & (count_ >= 2) & std_.notna() & (std_ > eps)
+        z = ((y - mean_) / (std_ + eps)).where(z_valid, np.nan)
+
+        new_cols[z_col] = z.astype("float32")
+        new_target_cols.append(z_col)
+
+        # 2) rank target: pct rank -> [-1, 1]
+        rank_col = f"{col}_cs_rank"
+
+        rank_valid = base_mask & (count_ >= 2)
+
+        pct_rank = grp.rank(pct=True, method="average")
+        rank_scaled = (2.0 * pct_rank - 1.0).where(rank_valid, np.nan)
+
+        new_cols[rank_col] = rank_scaled.astype("float32")
+        new_target_cols.append(rank_col)
+
+    out = pd.concat([out, pd.DataFrame(new_cols, index=out.index)], axis=1)
+
+    return out, new_target_cols
+
+
 def build_processed_panel(config: ProcessedPanelConfig) -> ProcessedPanelBuildResult:
     raw_df = load_from_parquet(config.raw_file_path)
     raw_df = raw_df.sort_values(["ts_code", "date"], ignore_index=True)
@@ -679,6 +939,12 @@ def build_processed_panel(config: ProcessedPanelConfig) -> ProcessedPanelBuildRe
     processed_df, target_columns = add_targets(panel_df, horizons=config.target_horizons)
     _log_columns_once("add_targets", list(panel_df.columns), list(processed_df.columns))
     logger.info(f"raw_df shape: {raw_df.shape}, panel_df shape: {panel_df.shape}, processed_df shape: {processed_df.shape}")
+    processed_df, cross_sectional_target_columns = add_cross_sectional_targets(
+        processed_df,
+        target_column_prefixes=["y_ret_"],
+        date_col="date",
+    )
+    _log_columns_once("add_cross_sectional_targets", list(panel_df.columns), list(processed_df.columns))
     processed_path = config.processed_path
     config_path = config.config_path
     processed_path.parent.mkdir(parents=True, exist_ok=True)
@@ -686,6 +952,7 @@ def build_processed_panel(config: ProcessedPanelConfig) -> ProcessedPanelBuildRe
     processed_df = processed_df.sort_values(["ts_code", "date"], ignore_index=True)
     processed_df.to_parquet(processed_path, index=False, engine="pyarrow")
     config.target_columns = target_columns
+    config.cross_sectional_target_columns = cross_sectional_target_columns
     config.feature_specs = feature_specs
     _save_processed_config(config)
     logger.info(
@@ -947,6 +1214,8 @@ def _compute_targets_for_window(
     }
 
 _RETURN_LABEL_PATTERN = re.compile(r"^y_ret_(\d+)$")
+_RETURN_CS_Z_LABEL_PATTERN = re.compile(r"^y_ret_(\d+)_cs_z$")
+_RETURN_CS_RANK_LABEL_PATTERN = re.compile(r"^y_ret_(\d+)_cs_rank$")
 _RETURN_RA_LABEL_PATTERN = re.compile(r"^y_ret_(\d+)_ra$")
 _RISK_VOL_LABEL_PATTERN = re.compile(r"^y_risk_vol_(\d+)$")
 _RISK_LABEL_PATTERN = re.compile(r"^y_risk_(\d+)$")
@@ -960,6 +1229,10 @@ def _target_column_horizon(target_column: str) -> int | None:
     if (match := _RISK_VOL_LABEL_PATTERN.fullmatch(target_column)) is not None:
         return int(match.group(1))
     if (match := _RISK_LABEL_PATTERN.fullmatch(target_column)) is not None:
+        return int(match.group(1))
+    if (match := _RETURN_CS_Z_LABEL_PATTERN.fullmatch(target_column)) is not None:
+        return int(match.group(1))
+    if (match := _RETURN_CS_RANK_LABEL_PATTERN.fullmatch(target_column)) is not None:
         return int(match.group(1))
     return None
 
@@ -980,54 +1253,20 @@ def _target_mask_column(target_column: str) -> str:
 #     return target_columns
 
 
-def _apply_feature_scaler(
-    dataset_df: pd.DataFrame,
-    scaler_feature_columns: Sequence[str],
-    scaler: StandardScaler,
-) -> pd.DataFrame:
-    if dataset_df.empty:
-        return dataset_df
-
-    scaled_df = dataset_df.copy()
-    scaler_feature_columns = list(scaler_feature_columns)
-    scaled_df[scaler_feature_columns] = scaled_df[scaler_feature_columns].astype(np.float64)
-    scaled_df.loc[:, scaler_feature_columns] = scaler.transform(
-        scaled_df.loc[:, scaler_feature_columns].to_numpy()
-    )
-    scaled_df = optimize_df(scaled_df)
-    return scaled_df
-
-
 def build_and_save_features(
     processed_df: pd.DataFrame,
     feature_columns: Sequence[str],
-    scaler_feature_columns: Sequence[str],
-    scaler: StandardScaler,
     features_dir: Path,
     dataset_name: str,
 ) -> Path:
     features_dir.mkdir(parents=True, exist_ok=True)
 
     feature_columns = list(feature_columns)
-    scaler_feature_columns = list(scaler_feature_columns)
 
     missing_feature_cols = [c for c in feature_columns if c not in processed_df.columns]
     if missing_feature_cols:
         raise ValueError(
             f"Feature columns missing in processed_df: {missing_feature_cols}"
-        )
-
-    missing_scaler_cols = [c for c in scaler_feature_columns if c not in processed_df.columns]
-    if missing_scaler_cols:
-        raise ValueError(
-            f"Scaler columns missing in processed_df: {missing_scaler_cols}"
-        )
-
-    # scaler 列必须是 feature 列子集
-    extra_scaler_cols = [c for c in scaler_feature_columns if c not in feature_columns]
-    if extra_scaler_cols:
-        raise ValueError(
-            f"Scaler columns are not a subset of feature_columns: {extra_scaler_cols}"
         )
 
     # 底表必须包含所有模型输入列
@@ -1056,19 +1295,11 @@ def build_and_save_features(
         .fillna(0.0)
     )
 
-    # 4) 只对 scaler_feature_columns 做标准化
-    if scaler_feature_columns:
-        features_df = _apply_feature_scaler(
-            features_df,
-            scaler_feature_columns=scaler_feature_columns,
-            scaler=scaler,
-        )
-
-    # 5) 生成 mask 列
+    # 4) 生成 mask 列
     mask_df = raw_mask.astype("int8").add_suffix("_mask")
     features_df = pd.concat([features_df, mask_df], axis=1)
 
-    # 6) 最终硬校验：不允许 feature_columns 里残留 NaN
+    # 5) 最终硬校验：不允许 feature_columns 里残留 NaN
     remaining_nan_cols = features_df[feature_columns].columns[
         features_df[feature_columns].isna().any()
     ].tolist()
@@ -1157,7 +1388,10 @@ def build_datasets(
     processed_df, persisted_config = load_processed_panel(config.processed)
     _log_columns_once("load_processed_panel", None, list(processed_df.columns))
     target_columns = persisted_config["artifact_signature"]["target_columns"]
-    feature_columns = select_lstm_feature_columns(processed_df, target_columns=target_columns)
+    cross_sectional_target_columns = persisted_config["artifact_signature"]["cross_sectional_target_columns"]
+    all_target_columns = target_columns + cross_sectional_target_columns
+    raw_feature_columns = select_lstm_feature_columns(processed_df, target_columns=all_target_columns)
+    feature_columns = filter_derived_zscore_feature_columns(raw_feature_columns)
     _log_columns_once("select_lstm_feature_columns", list(processed_df.columns), list(feature_columns))
     if not feature_columns:
         raise ValueError("No LSTM feature columns were selected from processed_df.")
@@ -1178,22 +1412,23 @@ def build_datasets(
     )
     feature_specs = persisted_config["artifact_signature"]["feature_specs"]
 
-    # 先确定最终真正进入模型、且需要 scaler 的列
-    scaler_feature_columns = [
+    preprocess_feature_columns = [
         c for c in select_scaler_feature_columns(feature_specs)
         if c in feature_columns
     ]
-
+    normalized_processed_df, bounded_features, ratio_features, normal_features = preprocess_model_features(
+        processed_df=processed_df,
+        feature_columns=preprocess_feature_columns,
+        window=_ROLLING_NORMALIZATION_WINDOW,
+        min_periods=_ROLLING_NORMALIZATION_MIN_PERIODS,
+    )
     logger.info(
         "Resolved feature groups",
         feature_columns_count=len(feature_columns),
-        scaler_feature_columns_count=len(scaler_feature_columns),
-    )
-
-    scaler = fit_train_scaler(
-        processed_df=processed_df,
-        scaler_feature_columns=scaler_feature_columns,
-        split_config=config.splits,
+        preprocess_feature_columns_count=len(preprocess_feature_columns),
+        bounded_features_count=len(bounded_features),
+        ratio_features_count=len(ratio_features),
+        normal_features_count=len(normal_features),
     )
     logger.info("Save dataset with feature_base + metadata")
 
@@ -1201,29 +1436,38 @@ def build_datasets(
 
     # 先构建并保存全局 feature base
     features_path = build_and_save_features(
-        processed_df=processed_df,
-        feature_columns=feature_columns,
-        scaler_feature_columns=scaler_feature_columns,
-        scaler=scaler,
+        processed_df=normalized_processed_df,
+        feature_columns=raw_feature_columns,
         features_dir=config.dataset_dir,
         dataset_name=config.dataset_name,
     )
 
     # metadata 生成仍然必须基于保留 target 列的 source_df，而不是 features_df
     cross_sectional_columns = select_cross_sectional_feature_columns(feature_specs)
-    metadata_columns = ["ts_code", "date", "in_csi300", *target_columns, *cross_sectional_columns]
+    metadata_columns = [
+        "ts_code",
+        "date",
+        "in_csi300",
+        *all_target_columns,
+        *cross_sectional_columns
+    ]
     metadata_columns = list(dict.fromkeys(metadata_columns))
 
     metadata_source_df = processed_df.loc[:, metadata_columns].copy()
     metadata_source_df["date"] = pd.to_datetime(metadata_source_df["date"]).dt.normalize()
     metadata_source_df = metadata_source_df.sort_values(["ts_code", "date"], ignore_index=True)
+    if normal_features:
+        metadata_source_df = truncate_grouped_warmup_rows(
+            metadata_source_df,
+            min_periods=_ROLLING_NORMALIZATION_MIN_PERIODS,
+        )
 
     dataset_paths, sample_counts = build_and_save_dataset(
         source_df=metadata_source_df,
         feature_specs=feature_specs,
         sequence_config=config.sequence,
         trading_calendar=trading_calendar,
-        target_columns=target_columns,
+        target_columns=all_target_columns,
         label_column=config.label_column,
         split_config=config.splits,
         split_on=config.split_on,
@@ -1241,8 +1485,8 @@ def build_datasets(
         processed_path=config.processed.processed_path,
         processed_config_path=config.processed.config_path,
         dataset_paths=dataset_paths,
-        feature_columns=feature_columns,
-        target_columns=target_columns,
+        feature_columns=raw_feature_columns,
+        target_columns=all_target_columns,
         cross_sectional_columns=select_cross_sectional_feature_columns(feature_specs),
         sample_counts=sample_counts,
     )
@@ -1313,13 +1557,13 @@ if __name__ == "__main__":
             max_missing_trade_days_per_gap=2,
             max_missing_gaps=1,
         ),
-        label_column="y_ret_5",
+        label_column="y_ret_5_cs_z",
         exchange="SSE",
         dataset_name="csi300_2017_2025_seq60_step5_targets_5_10_20_label_y_ret_5",
         split_on="label_date",
         universe_filter_mode="anchor_date",
         train_start_interval=5,
-        evaluate_start_interval=1,
+        evaluate_start_interval=5,
         test_start_interval=1,
     )
 

@@ -9,6 +9,9 @@ from alpha_arena.train.trainer import load_model_from_pretrained
 from alpha_arena.evaluation.metrics_main import daily_ic_rankic, summarize_ic
 from alpha_arena.evaluation.grouping import add_daily_grouping_by_prediction
 import pandas as pd
+from alpha_arena import PROJECT_ROOT
+
+EVALUATION_OUTPUT_DIR = PROJECT_ROOT / "evaluations"
 
 
 def test_dataloader(dataset_name: str, batch_size: int) -> DataLoader:
@@ -115,7 +118,9 @@ def main():
 
     test_loader = test_dataloader(dataset_name, batch_size)
 
-    model_path = "checkpoints/train_20260424_192645/best_model.pt"
+    model_path = "checkpoints/train_20260503_125825/best_model.pt"
+
+    train_id = model_path.split("/")[1]
 
     model, model_config = load_model_from_pretrained(model_path)
 
@@ -123,8 +128,8 @@ def main():
 
     ic_rankic_df, summary, predictions_df = compute_metrics(predictions_df)
 
-    ic_rankic_df.to_csv("ic_rankic_by_date.csv", index=False)
-    predictions_df.to_csv("predictions_with_groups.csv", index=False)
+    ic_rankic_df.to_csv(EVALUATION_OUTPUT_DIR / f"{train_id}_ic_rankic_by_date.csv", index=False)
+    predictions_df.to_csv(EVALUATION_OUTPUT_DIR / f"{train_id}_predictions_with_groups.csv", index=False)
 
     print(predictions_df.head())
     print(ic_rankic_df.head())

@@ -380,8 +380,8 @@ def run_one_epoch(
                 # t_opt1 = time.time()
 
                 loss_dict = unwrap_model(model).compute_loss(
+                    batch,
                     outputs=outputs,
-                    target_return=batch["y_return"],
                     loss_type=loss_type,
                     alpha_rank=alpha_rank,
                     alpha_mse=alpha_mse,
@@ -549,12 +549,50 @@ def train_model_ddp(
     if scheduler_step_on not in {"epoch", "valid_metric"}:
         raise ValueError(f"scheduler_step_on must be 'epoch' or 'valid_metric', got {scheduler_step_on}")
 
+
+    def get_epoch_hyperparams(epoch: int) -> tuple[float, float]:
+        if epoch < warmup_epochs:
+            train_loader = train_random_loader
+            alpha_rank = warmup_alpha_rank
+            alpha_mse = warmup_alpha_mse
+            lr = warmup_lr
+            monitor = "valid/loss"
+            monitor_mode = "min"
+            stage = "warmup"
+        elif epoch < warmup_epochs + mid_epochs:
+            train_loader = train_grouped_loader
+            alpha_rank = mid_alpha_rank
+            alpha_mse = mid_alpha_mse
+            lr = mid_lr
+            monitor = "valid/rank_ic_mean"
+            monitor_mode = "max"
+            stage = "main_mid"
+        else:
+            train_loader = train_grouped_loader
+            alpha_rank = main_alpha_rank
+            alpha_mse = main_alpha_mse
+            lr = main_lr
+            monitor = "valid/rank_ic_mean"
+            monitor_mode = "max"
+            stage = "main"
+        return {
+            "train_loader": train_loader,
+            "alpha_rank": alpha_rank,
+            "alpha_mse": alpha_mse,
+            "lr": lr,
+            "monitor": monitor,
+            "monitor_mode": monitor_mode,
+            "stage": stage,
+        }
+
     amp_enabled = use_amp and (device.type == "cuda")
     scaler = torch.amp.GradScaler(device="cuda", enabled=amp_enabled)
 
     start_epoch = 0
     history: list[dict[str, Any]] = []
-    best_metric = float("inf") if monitor_mode == "min" else -float("inf")
+
+    start_epoch_hyperparams = get_epoch_hyperparams(start_epoch)
+    best_metric = float("inf") if start_epoch_hyperparams["monitor_mode"] == "min" else -float("inf")
     best_epoch = -1
     best_state_dict = None
     epochs_without_improve = 0
@@ -572,8 +610,9 @@ def train_model_ddp(
         start_epoch = int(ckpt["epoch"]) + 1
         best_metric = float(ckpt.get("best_metric", best_metric))
         history = ckpt.get("history", [])
-        monitor = ckpt.get("extra_state", {}).get("monitor", monitor)
-        monitor_mode = ckpt.get("extra_state", {}).get("monitor_mode", monitor_mode)
+        monitor = ckpt.get("extra_state", {}).get("monitor", start_epoch_hyperparams["monitor"])
+        monitor_mode = ckpt.get("extra_state", {}).get("monitor_mode", start_epoch_hyperparams["monitor_mode"])
+        previous_monitor_model = ckpt.get("extra_state", {}).get("previous_monitor_model", None)
 
         if history:
             best_record = None
@@ -608,33 +647,23 @@ def train_model_ddp(
 
 
     barrier()
-
+    previous_monitor_model = None
     # ---------------- train loop ----------------
     for epoch in range(start_epoch, num_epochs):
-        if epoch < warmup_epochs:
-            train_loader = train_random_loader
-            alpha_rank = warmup_alpha_rank
-            alpha_mse = warmup_alpha_mse
-            lr = warmup_lr
-            monitor = "valid/loss"
-            monitor_mode = "min"
-            stage = "warmup"
-        elif epoch < warmup_epochs + mid_epochs:
-            train_loader = train_grouped_loader
-            alpha_rank = mid_alpha_rank
-            alpha_mse = mid_alpha_mse
-            lr = mid_lr
-            monitor = "valid/rank_ic_mean"
-            monitor_mode = "max"
-            stage = "main_mid"
-        else:
-            train_loader = train_grouped_loader
-            alpha_rank = main_alpha_rank
-            alpha_mse = main_alpha_mse
-            lr = main_lr
-            monitor = "valid/rank_ic_mean"
-            monitor_mode = "max"
-            stage = "main"
+        epoch_hyperparams = get_epoch_hyperparams(epoch)
+        train_loader = epoch_hyperparams["train_loader"]
+        alpha_rank = epoch_hyperparams["alpha_rank"]
+        alpha_mse = epoch_hyperparams["alpha_mse"]
+        lr = epoch_hyperparams["lr"]
+        monitor = epoch_hyperparams["monitor"]
+        monitor_mode = epoch_hyperparams["monitor_mode"]
+        stage = epoch_hyperparams["stage"]
+
+        if previous_monitor_model != monitor_mode:
+            best_metric = float("inf") if monitor_mode == "min" else -float("inf")
+            best_epoch = -1
+            epochs_without_improve = 0
+            previous_monitor_model = monitor_mode
 
         is_better = (
             (lambda current, best: current < best - min_delta)
@@ -718,6 +747,7 @@ def train_model_ddp(
                             "monitor_mode": monitor_mode,
                             "world_size": get_world_size(),
                             "amp_enabled": amp_enabled,
+                            "previous_monitor_model": previous_monitor_model,
                         },
                     )
                     save_model(
