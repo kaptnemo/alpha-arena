@@ -1,309 +1,216 @@
 # Alpha Arena
 
-`Alpha Arena` 是一个面向 **A 股面板时序建模** 的**严肃量化研究原型**。
-它关注的不是单个模型是否“跑通”，而是把数据口径、特征构造、训练流程、结构对比与研究结论沉淀在同一套工程中，用于回答：
+> A research-first AI project for A-share panel modeling.
 
-> 在严格避免数据泄漏的前提下，针对 CSI 300 等股票池的历史序列与横截面特征，哪些时序建模结构能够在 **IC / Rank IC / 分组收益** 上稳定优于可信基线？
+`Alpha Arena` 是一个面向 **A 股量化研究** 的 AI 项目原型，目标不是单独展示某个模型，而是搭建一条从 **数据接入 -> 特征工程 -> 序列建模 -> 评估分析** 的完整研究链路，用来验证模型是否真的在 **IC / Rank IC / 分组收益** 上带来稳定增益。
 
----
+它更像一个 **financial time-series research stack**，而不是一个“已经可实盘”的交易系统。
 
-## 1. 项目定位
+## Why Alpha Arena
 
-这个仓库当前的合理定位是：
+大多数时序项目只回答“模型能不能跑”，这个仓库想回答的是：
 
-| 定位 | 判断 |
-| --- | --- |
-| Demo | 已经超过 |
-| 研究原型 | 当前定位 |
-| 可交易级 alpha 系统 | 还未达到 |
+- 数据口径是否时序安全
+- 特征和标签是否可复现
+- 模型提升是否能在统一评估下成立
+- attention / dual-head / memory cache 是否真的有效
 
-它已经具备数据、特征、模型、训练的主链路，但还在补齐评估、回测、基线体系与 ablation 框架。
-因此，这个项目**不应被理解为“一个最终策略”**，而应被理解为：
+换句话说，`Alpha Arena` 关注的不只是模型结构，而是 **研究闭环本身**。
 
-- 一个面向 A 股时序建模的研究工程骨架
-- 一个围绕基线、结构对比和可复现实验管理持续演进的研究平台
-- 一个用于沉淀研究结论，而不是堆积零散 notebook 的仓库
+## Highlights
 
----
+- **Research-first**：先做评估闭环，再堆模型复杂度
+- **Time-series safe**：强调避免 look-ahead bias 和数据泄漏
+- **Panel-aware**：面向 `date x ts_code` 的 A 股面板建模场景
+- **Modular pipeline**：数据、特征、模型、训练、评估分层清晰
+- **Built for ablations**：适合做结构对比、标签实验和基线对照
 
-## 2. 研究目标
+## Current Scope
 
-项目的中期目标不是“做出更复杂的模型”，而是逐步形成下面这些研究能力：
+当前仓库已经覆盖以下主链路：
 
-1. 同一实验的**数据、配置、结果**可以被清晰记录与追踪
-2. 传统方法、深度基线与增强结构可以放在**同一口径**下观察表现
-3. attention、dual-head、memory cache 等设计可以通过 **ablation** 拆开验证
-4. 研究判断最终落在 **IC / Rank IC / 分组收益 / long-short**，而不是停留在训练 loss
+1. **Data ingestion**
+   基于 Tushare 抓取股票日线和指数成分数据，支持 `CSI 300 / CSI 500 / CSI 1000 / SSE 50` 等研究场景。
 
-对应的总体路线见 [`ROAD_MAP.md`](./ROAD_MAP.md)。
+2. **Feature engineering**
+   提供基础价格特征、收益率特征、波动率特征、风险调整特征、技术指标、时间编码，以及横截面 rank / z-score 特征。
 
----
+3. **Dataset building**
+   将 panel 数据转换为 LSTM 可用的序列样本，按年份切分 `train / evaluate / test`，并结合交易日历构造时序安全的样本锚点。
 
-## 3. 当前状态
+4. **Modeling**
+   当前包含两条主要模型线：
+   - `AEDH-LSTM`：Attention-Enhanced Dual-Head LSTM
+   - `AMC-LSTM`：带 segment memory cache 的增强原型
 
-### 已具备
+5. **Evaluation**
+   已具备按日期计算 `IC / Rank IC`、按预测值分组、long-short spread 汇总，以及研究报告型文本摘要。
 
-- **数据接入**
-  - BaoStock / Tushare 数据抓取
-  - parquet / 本地文件加载
-- **特征工程**
-  - 单股票时序特征
-  - panel 横截面特征
-  - 标签构造
-  - LSTM 输入列筛选
-- **模型原型**
-  - `AEDH-LSTM`：注意力增强双头 LSTM 基线
-  - `AMC-LSTM`：带 segment memory cache 的增强原型
-- **训练入口**
-  - `src/alpha_arena/train/main.py`
-  - `src/notebooks/train_aedh_lstm.py`
-  - `src/notebooks/train_aedh_lstm.ipynb`
-
-### 仍在补齐
-
-- 统一实验配置与结果落盘协议
-- 统一 prediction schema
-- IC / Rank IC / 分组收益 / long-short 评估层
-- baseline family（线性、树模型、MLP、plain LSTM）
-- 系统化 ablation pipeline
-- 回测与交易成本敏感性分析
-
----
-
-## 4. 研究原则
-
-### 时序安全优先
-
-- 标签仅由未来价格构造
-- 数据切分按时间推进，不做随机切分
-- 序列样本与 panel 样本保持 `date × ts_code` 对齐
-
-### 先做研究闭环，再堆模型复杂度
-
-没有统一评估与复现协议之前，新增复杂模型只会增加不确定性，不会增加研究可信度。
-
-### 所有改进必须打基线
-
-任何结构升级都必须至少与以下对象比较：
-
-- 朴素规则基线
-- 非深度学习基线
-- 当前稳定深度基线
-
-### 研究结论必须可复核
-
-一次实验最终应能回答：
-
-- 用了哪份数据
-- 用了哪组特征
-- 用了哪份配置
-- 在哪些窗口上有效
-- 相比哪些基线更好
-- 提升是否具有稳定性
-
----
-
-## 5. 当前工程结构
-
-| 模块 | 作用 |
-| --- | --- |
-| `src/alpha_arena/data/` | 数据抓取、读取与本地落盘 |
-| `src/alpha_arena/features/` | 特征构造、标签生成、特征筛选 |
-| `src/alpha_arena/models/` | 时序模型定义与结构原型 |
-| `src/alpha_arena/train/` | 数据集封装、训练器、训练入口 |
-| `src/alpha_arena/cli/` | CLI 数据抓取入口 |
-| `src/notebooks/` | notebook 友好的训练脚本与 Jupyter notebook |
-| `configs/` | 后续实验配置化入口 |
-| `ROAD_MAP.md` | 研究原型演进路线图 |
-
-项目关注的主链路是：
+## Project Structure
 
 ```text
-raw market data
-  -> data ingestion / load
-  -> single-stock temporal features
-  -> panel cross-sectional features
-  -> future return targets
-  -> sequence dataset build
-  -> model training
-  -> prediction / evaluation / backtest
+src/alpha_arena/
+├── cli/          # Typer CLI
+├── data/         # 数据抓取、加载、外部数据源辅助
+├── evaluation/   # IC、分组、报告分析
+├── features/     # 特征工程、标签生成、特征筛选
+├── models/       # AEDH-LSTM / AMC-LSTM
+├── train/        # 数据集、采样器、训练器、训练入口
+└── utils/        # 日志与通用工具
+
+data/
+├── raw/
+├── processed/
+└── dataset/
+
+checkpoints/      # 训练产物
+evaluations/      # 评估产物
+docs/             # 设计文档与模型笔记
 ```
 
----
-
-## 6. 当前模型路线
-
-| 模型 | 文件 | 当前定位 |
-| --- | --- | --- |
-| `AEDH-LSTM` | `src/alpha_arena/models/aedh_lstm.py` | 稳定、清晰、可解释的深度基线 |
-| `AMC-LSTM` | `src/alpha_arena/models/amc_lstm.py` | 面向长依赖建模的增强结构原型 |
+## Models
 
 ### AEDH-LSTM
 
-核心结构：
+当前主深度基线，核心结构包括：
 
 - input projection
-- multi-layer LSTM
+- stacked LSTM
 - temporal attention
-- `context + last_state` 融合
-- dual heads：收益头 + 风险头
+- `context + last_state` fusion
+- dual heads: return head + risk head
 
-研究意义：
-
-- 作为当前的主深度基线
-- 便于做 attention / dual-head / loss 设计的 ablation
+适合做 attention、loss、cross-sectional feature 等方向的 ablation。
 
 ### AMC-LSTM
 
-核心结构：
+面向更长依赖建模的增强结构，核心思想是：
 
-- 多层 `LSTMCell` 级联
-- segment-level memory cache
-- 历史片段检索与融合
-- temporal attention + dual heads
+- 将序列切成 segment
+- 缓存历史 segment 表征
+- 在当前时刻做记忆检索与融合
 
-研究意义：
+重点不是“更复杂”，而是验证 **memory mechanism** 是否真的在研究指标上带来稳定收益。
 
-- 用于检验更强的长依赖建模是否带来稳定提升
-- 重点不是“更复杂”，而是验证 memory 机制是否真的有效
+## End-to-End Workflow
 
----
+```text
+Tushare / market data
+  -> raw panel data
+  -> feature engineering
+  -> future return targets
+  -> sequence dataset build
+  -> model training
+  -> prediction
+  -> IC / Rank IC / grouping analysis
+```
 
-## 7. 特征与标签设计
+## Quickstart
 
-项目当前的特征工程围绕两类信息组织：
+### 1. Install
 
-### 单股票时序特征
-
-- 收益率与价格行为
-- 波动率与风险代理
-- 成交量与成交活跃度
-- `ta` / `pandas-ta` 技术指标
-- 时间周期编码
-
-### 横截面特征
-
-- `*_cs_rank`
-- `*_cs_z`
-
-这类特征用于补充同一交易日截面内的相对强弱信息。
-
-### 标签构造
-
-当前标签设计遵守以下原则：
-
-- 在同一股票内部按时间 `shift(-h)` 构造未来收益
-- 不跨股票错位
-- 末尾自然产生缺失标签，训练时过滤
-
-### 输入稳定性处理
-
-项目对数值特征使用 rolling z-score，目标是：
-
-- 缓解金融时间序列的非平稳性
-- 控制不同特征量纲差异
-- 改善 LSTM 类模型训练稳定性
-
----
-
-## 8. 为什么它不是“又一个模型 demo”
-
-这个仓库的重点不是单独展示某个模型结构，而是把下面几层边界拆开：
-
-- **data**：数据从哪里来，怎么落盘
-- **features**：模型看什么，标签怎么定义
-- **models**：序列如何编码
-- **train**：如何训练并保存 history
-- **eval / backtest**：结果如何判断是否真实有效
-
-真正的目标不是“跑出一个低 loss”，而是让未来能够系统回答：
-
-- attention 是否优于只看最后一步
-- dual-head 是否提升排序稳定性
-- memory cache 是否真正改善长依赖建模
-- 某个结构的提升是否跨年份、跨市场状态存在
-
----
-
-## 9. 快速开始
-
-### 安装依赖
+项目使用 Poetry，Python 版本要求见 `pyproject.toml`。
 
 ```bash
 poetry install
 ```
 
-### 数据抓取
+### 2. Configure data source
+
+项目会从环境变量读取 `TUSHARE_TOKEN`：
 
 ```bash
-poetry run arena_cli index_stocks 2017 2025 --index-name csi300 --storage-format parquet
-poetry run arena_cli stock_daily sh.600000 20200101 20251231 --storage-format parquet
+export TUSHARE_TOKEN="your_token"
 ```
 
-### 运行训练脚本
+### 3. Explore the CLI
 
 ```bash
-poetry run python src/notebooks/train_aedh_lstm.py
+poetry run arena_cli --help
 ```
 
-这个脚本会：
+当前 CLI 提供两个入口：
 
-- 加载 `SequenceDataset`
-- 启动单机训练
-- 输出训练日志
-- 保存 checkpoint / history
-- 绘制并保存 loss 曲线
+- `stock-daily`
+- `index-stocks`
 
-### 使用 Jupyter Notebook
+### 4. Fetch market data
 
-打开：
+抓取单只股票日线：
 
-```text
-src/notebooks/train_aedh_lstm.ipynb
+```bash
+poetry run arena_cli stock-daily sh.600000 20200101 20201231
 ```
 
-Notebook 当前适合：
+抓取指数成分股区间数据：
 
-- 快速检查训练链路
-- 观察日志输出
-- 查看 loss 曲线
+```bash
+poetry run arena_cli index-stocks 2019 2024 --index-name csi300
+```
 
-它目前**不是**实验管理与评估的最终形态。
+## Evaluation Mindset
 
----
+这个项目不把 `loss` 作为最终结论，而更关注：
 
-## 10. 下一阶段的关键工作
+- `IC`
+- `Rank IC`
+- prediction grouping
+- long-short spread
+- 稳定性和可重复性
 
-按照当前路线，优先级最高的三件事是：
+所以它更接近一个 **AI for quantitative research** 项目，而不是单纯的深度学习 demo。
 
-1. **补齐统一评估与分组回测**
-2. **建立传统基线 + 深度基线对照组**
-3. **把 AEDH-LSTM / AMC-LSTM 放进统一 ablation 框架**
+## Current Status
 
-这三步完成后，项目才会从“研究工程骨架”真正进入“可产出研究结论”的状态。
+这个仓库当前最适合：
 
----
+- 做 A 股 panel 时序建模实验
+- 验证特征、标签和模型结构
+- 做 baseline 对比和 ablation
+- 沉淀统一的数据与评估口径
 
-## 11. 当前边界与预期管理
+当前仍在继续完善：
 
-这个项目当前**不宣称**：
+- 统一实验配置协议
+- 更标准化的训练/评估入口
+- baseline family
+- 更完整的回测与报告产物
 
-- 已经形成可交易级策略
-- 已经验证稳定实盘 alpha
-- 已经完成严格回测闭环
+## Reading Order
 
-这个项目当前**可以合理宣称**：
+如果你第一次进入这个仓库，推荐这样阅读：
 
-- 已经形成 A 股时序建模的工程主链路
-- 已经具备做基线与结构对比研究的基础
-- 正在朝“严肃量化研究原型”推进
+1. `ROAD_MAP.md`：先理解项目的研究目标
+2. `src/alpha_arena/features/`：理解特征和标签口径
+3. `src/alpha_arena/train/dataset/builder.py`：理解时序样本构造
+4. `src/alpha_arena/models/`：理解 AEDH-LSTM / AMC-LSTM
+5. `src/alpha_arena/evaluation/`：理解“如何判断模型有效”
 
----
+## Testing
 
-## 12. 参考文档
+仓库当前带有 `src/tests/` 下的单元测试，覆盖重点包括：
 
-- [`ROAD_MAP.md`](./ROAD_MAP.md)：项目演进路线图
-- `src/alpha_arena/models/`：模型原型
-- `src/alpha_arena/train/`：训练主链路
-- `src/notebooks/train_aedh_lstm.py`：notebook 友好训练脚本
-- `src/notebooks/train_aedh_lstm.ipynb`：Jupyter 训练入口
+- 数据接入配置
+- 特征构建一致性
+- 数据集切分与采样策略
+- 分组评估
+- 报告汇总逻辑
+
+```bash
+pytest -q
+```
+
+## Roadmap
+
+按照现有路线，接下来的重点是：
+
+1. 补齐统一评估与分组回测
+2. 建立传统基线与深度基线对照组
+3. 将 AEDH-LSTM / AMC-LSTM 纳入统一 ablation 框架
+
+更多背景见 [`ROAD_MAP.md`](./ROAD_MAP.md)。
+
+## Disclaimer
+
+这是一个 **research prototype**。
+它用于研究和验证 alpha 建模思路，不应被直接视为可实盘部署的交易系统或收益承诺。
